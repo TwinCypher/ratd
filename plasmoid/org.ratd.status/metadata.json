@@ -1,0 +1,13 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [{"Name": "TwinCypher"}],
+        "Category": "System Information",
+        "Description": "Current mouse DPI, battery and profile from ratd",
+        "Icon": "input-mouse",
+        "Id": "org.ratd.status",
+        "License": "MIT",
+        "Name": "Mouse (ratd)"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

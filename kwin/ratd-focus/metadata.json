@@ -1,0 +1,13 @@
+{
+    "KPlugin": {
+        "Id": "ratd-focus",
+        "Name": "ratd focus reporter",
+        "Description": "Tells the ratd mouse service which window is focused, for per-game profiles",
+        "Version": "0.1",
+        "License": "MIT",
+        "EnabledByDefault": true
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js",
+    "KPackageStructure": "KWin/Script"
+}

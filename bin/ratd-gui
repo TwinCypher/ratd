@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run the settings window from a checkout, wherever it lives (follows symlinks).
+ROOT=$(dirname "$(dirname "$(readlink -f "$0")")")
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m ratd.gui "$@"

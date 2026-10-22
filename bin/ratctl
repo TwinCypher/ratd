@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run ratctl from a checkout, wherever it lives (follows symlinks, e.g. from ~/.local/bin).
+ROOT=$(dirname "$(dirname "$(readlink -f "$0")")")
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m ratd.ctl "$@"

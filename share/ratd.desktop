@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mouse Settings
+GenericName=Mouse configuration (ratd)
+Comment=Button bindings, DPI and per-game profiles
+Exec=ratd-gui
+Icon=input-mouse
+Categories=Settings;HardwareSettings;Qt;
+Keywords=mouse;dpi;logitech;g502;profile;buttons;

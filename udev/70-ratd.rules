@@ -1,0 +1,8 @@
+# ratd: let the logged-in user talk HID++ to Logitech devices and create the
+# virtual input device used for key combos and horizontal scroll.
+# (Same access Solaar's 42-logitech-unify-permissions.rules used to provide.)
+ACTION=="remove", GOTO="ratd_end"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", TAG+="uaccess"
+SUBSYSTEM=="hidraw", KERNELS=="0005:046D:*", TAG+="uaccess"
+LABEL="ratd_end"

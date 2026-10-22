@@ -1,0 +1,14 @@
+[Unit]
+Description=ratd mouse configuration service
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Environment=PYTHONPATH=%h/Projects/ratd
+ExecStart=/usr/bin/python3 -m ratd
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,6 +1,7 @@
 """ratd settings window. Edits ~/.config/ratd/config.json through the service (SetConfig),
 so every change is validated and applied by the daemon."""
 import copy
+import html
 import json
 import os
 import subprocess
@@ -77,6 +78,9 @@ def describe(act, default=None):
     if t == "media":
         return MEDIA_ACTIONS.get(act.get("action"), "Media")
     if t == "shift":
+        also = act.get("also")
+        if also:
+            return describe(also) + " + hold for layer"
         return "Hold for second layer"
     if t == "wheel":                    # GUI-only: what a wheel notch does when not bound
         return f"Scroll {act.get('direction')}"
@@ -505,11 +509,34 @@ class BindingDialog(QDialog):
         self.command = QLineEdit()
         self.command.setPlaceholderText("e.g. spectacle -r")
         blank = QLabel("")
-        shift_help = QLabel("While held, buttons use their second-layer bindings\n"
-                            "(Buttons tab → While holding …).")
+        shift_page = QWidget()
+        sf = QFormLayout(shift_page)
+        sf.setContentsMargins(0, 0, 0, 0)
+        sf.addRow(QLabel("While held, buttons use their second-layer bindings\n"
+                         "(Buttons tab → While holding …)."))
+        self.also = KeyCapture()
+        self.also.setPlaceholderText("Optional: a key sent at once, e.g. V")
+        clear = QPushButton(QIcon.fromTheme("edit-clear"), "Clear")
+        clear.setToolTip("No key")
+        clear.clicked.connect(lambda: self.also.set_keys([]))
+        row = QHBoxLayout()
+        row.addWidget(self.also, 1)
+        row.addWidget(clear)
+        sf.addRow("Also press", row)
+        self.hold_ms = QSpinBox()
+        self.hold_ms.setRange(0, 2000)
+        self.hold_ms.setSingleStep(25)
+        self.hold_ms.setSuffix(" ms")
+        self.hold_ms.setSpecialValueText("Immediately")
+        self.hold_ms.setToolTip("How long the button must be held before the layer turns on.\n"
+                                "A quick tap shorter than this only sends the 'Also press' key.")
+        sf.addRow("Layer after", self.hold_ms)
+        # A key that fires on every press needs a hold delay, or every tap turns the layer on too.
+        self.also.changed.connect(lambda: self.also.keys and not self.hold_ms.value()
+                                  and self.hold_ms.setValue(200))
         for t, w in (("default", QLabel("Uses the normal binding while the hold button is held." if layer
                                         else "Does what this button normally does.")),
-                     ("shift", shift_help),
+                     ("shift", shift_page),
                      ("key", self.capture), ("mouse", self.mouse), ("media", media_page), ("dpi", self.dpi),
                      ("scroll", self.scroll), ("command", self.command), ("none", blank)):
             self.page[t] = self.pages.addWidget(w)
@@ -535,6 +562,10 @@ class BindingDialog(QDialog):
                 self.scroll.setCurrentIndex(max(0, self.scroll.findData(act.get("direction"))))
             elif t == "command":
                 self.command.setText(act.get("command", ""))
+            elif t == "shift":
+                also = act.get("also")
+                self.also.set_keys((also.get("keys") or [also["key"]]) if also else [])
+                self.hold_ms.setValue(act.get("hold_ms", 0))
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._accept)
@@ -576,6 +607,14 @@ class BindingDialog(QDialog):
             return {"type": "scroll", "direction": self.scroll.currentData()}
         if t == "command":
             return {"type": "command", "command": self.command.text().strip()}
+        if t == "shift":
+            act = {"type": "shift"}
+            keys = self.also.keys
+            if keys:
+                act["also"] = {"type": "key", "key": keys[0]} if len(keys) == 1 else {"type": "keys", "keys": keys}
+            if self.hold_ms.value():
+                act["hold_ms"] = self.hold_ms.value()
+            return act
         return {"type": t}
 
     def media_ignore(self):
@@ -1243,8 +1282,11 @@ class Window(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Keyboard volume keys")
         lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel("Volume keys and knobs on the ticked devices change\n"
-                             f"<b>{self.volume_device.currentText()}</b>. Others keep Plasma's behaviour."))
+        intro = QLabel("Volume keys and knobs on the ticked devices change<br>"
+                       f"<b>{html.escape(self.volume_device.currentText())}</b>. "
+                       "Others keep Plasma's behaviour.")
+        intro.setTextFormat(Qt.RichText)        # auto-detection only looks at the first line
+        lay.addWidget(intro)
         boxes = []
         for n in names:
             b = QCheckBox(n if n in volume_keyboards() else f"{n} (not connected)")

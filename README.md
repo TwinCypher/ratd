@@ -138,7 +138,10 @@ for volume:
           "wheel_down": {"type": "key", "key": "KEY_VOLUMEDOWN"}}
 ```
 
-Buttons not listed keep their normal binding. `wheel_up` / `wheel_down` fire once per
+Buttons not listed keep their normal binding. The hold button can also send a key at once,
+mirroring the button, and turn the layer on only once it has been held for `hold_ms`:
+`{"type": "shift", "also": {"type": "key", "key": "KEY_V"}, "hold_ms": 200}` gives an
+instant V on every press, and a quick tap never enables the layer. `wheel_up` / `wheel_down` fire once per
 notch; the wheel is only taken over (HID++ 0x2121) while the hold button is down and the
 layer binds it, so normal scrolling is untouched. In the GUI: Buttons tab → pick a
 **Hold button**, then **While holding …** to edit the second layer.

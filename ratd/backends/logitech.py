@@ -103,6 +103,7 @@ class LogitechMouse:
         self._repeat = {}                   # button name -> scroll repeat task
         self._pressed = {}                  # button name -> action it was pressed with
         self._shift = set()                 # shift buttons held down
+        self._hold_timers = {}              # shift button -> task turning its layer on after hold_ms
         self._wheel = None                  # (mode without divert, counts per notch), if supported
         self._wheel_diverted = False
         self._wheel_acc = 0
@@ -218,6 +219,7 @@ class LogitechMouse:
         self._repeat.clear()
         self._pressed.clear()
         self._shift.clear()
+        self._cancel_hold_timers()
         await self._divert_wheel(False, force=True)
         if self.keymap:
             try:
@@ -268,6 +270,7 @@ class LogitechMouse:
     async def _apply(self, profile, keep_dpi):
         self._profile = profile
         self._shift.clear()                 # a profile switch mid-hold must not leave a layer on
+        self._cancel_hold_timers()
         if not keep_dpi:
             self._dpi_index = profile.get("dpi_index", 0)
             self._sniper = False
@@ -375,7 +378,7 @@ class LogitechMouse:
             act, shifted = self._pressed.pop(name, (self._action(name), False))
         t = act["type"]
         if t == "shift":
-            self._set_shift(name, down)
+            self._hold(name, act, down)
             return
         # Shifted buttons are disabled in the keymap, so even plain keys go through uinput.
         if t == "key" and (shifted or not self._kernel_can(act["key"])):
@@ -419,11 +422,44 @@ class LogitechMouse:
         elif t == "media" and down:
             asyncio.get_running_loop().create_task(self.on_media(act["action"]))
 
+    def _hold(self, name, act, down):
+        """Hold button: its optional "also" key goes out at once, mirroring the button,
+        and the layer turns on after hold_ms (immediately if 0)."""
+        also = act.get("also")
+        timer = self._hold_timers.pop(name, None)
+        if timer:
+            timer.cancel()
+        if down:
+            if also:
+                codes = [keymap.keycode(k) for k in also.get("keys") or [also["key"]]]
+                self._held[name] = codes
+                self.vkbd.press(codes)
+            ms = act.get("hold_ms", 0)
+            if ms:
+                self._hold_timers[name] = asyncio.get_running_loop().create_task(self._hold_after(name, ms))
+            else:
+                self._set_shift(name, True)
+        else:
+            if name in self._held:
+                self.vkbd.release(self._held.pop(name))
+            self._set_shift(name, False)
+
+    def _cancel_hold_timers(self):
+        for t in self._hold_timers.values():
+            t.cancel()
+        self._hold_timers.clear()
+
+    async def _hold_after(self, name, ms):
+        await asyncio.sleep(ms / 1000)
+        self._hold_timers.pop(name, None)
+        self._set_shift(name, True)
+
     def _set_shift(self, name, down):
         was = bool(self._shift)
         (self._shift.add if down else self._shift.discard)(name)
         if bool(self._shift) == was:
             return
+        log.debug("%s: second layer %s", self.name, "on" if self._shift else "off")
         layer = (self._profile or {}).get("shift", {})
         for i, b in enumerate(self.buttons):
             if b in layer and layer[b]["type"] != "default" and self.keymap:

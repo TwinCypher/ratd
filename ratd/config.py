@@ -30,6 +30,9 @@ Button actions:
   {"type": "scroll", "direction": "left"|"right"}    horizontal scroll, repeats while held
   {"type": "command", "command": "notify-send hi"}   run on press
   {"type": "shift"}                            hold for the profile's shift layer
+  {"type": "shift", "also": {"type": "key", "key": "KEY_V"}, "hold_ms": 200}
+                                               ...also sending a key at once (held with the
+                                               button), the layer only after 200 ms held
   {"type": "media", "action": "playpause"|"next"|"previous"|"stop"}
                                                sent to a media player over MPRIS, skipping
                                                the apps in the top-level "media_ignore"
@@ -144,6 +147,14 @@ def _validate_action(where, bname, act):
         raise ConfigError(f"{where}: scroll direction must be 'left' or 'right'")
     if t == "command" and not str(act.get("command", "")).strip():
         raise ConfigError(f"{where}: empty command")
+    if t == "shift":
+        also = act.get("also")
+        if also is not None:
+            if not isinstance(also, dict) or also.get("type") not in ("key", "keys"):
+                raise ConfigError(f"{where}: 'also' must be a key or keys action")
+            _validate_action(f"{where} / also", "", also)
+        if not (isinstance(act.get("hold_ms", 0), int) and 0 <= act.get("hold_ms", 0) <= 2000):
+            raise ConfigError(f"{where}: hold_ms must be 0-2000")
     if t == "media" and act.get("action") not in MEDIA_ACTIONS:
         raise ConfigError(f"{where}: media action must be one of {sorted(MEDIA_ACTIONS)}")
 

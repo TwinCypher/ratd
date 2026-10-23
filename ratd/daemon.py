@@ -7,7 +7,6 @@ import os
 import signal
 import sys
 
-import evdev
 import pyudev
 from dbus_next import BusType, Message, MessageType
 from dbus_next.aio import MessageBus
@@ -16,61 +15,21 @@ from dbus_next.service import ServiceInterface, method, signal as dbus_signal
 from . import config
 from .media import Media
 from .volume import Volume
-from .backends.logitech import LogitechMouse
-from .hidpp import HidppNode, HidppError
+from .backends import BACKENDS
+from .backends.base import DEVICE_ERRORS, Hooks
 
 log = logging.getLogger("ratd")
 
 BUS_NAME, OBJ_PATH, IFACE = "org.ratd", "/org/ratd", "org.ratd.Manager"
-LOGITECH = 0x046D
 CHECK_INTERVAL = 30          # seconds between health checks / battery refresh
 LOW_BATTERY = (15, 5)        # notify when crossing these percentages
-
-
-def _sysattr(node, name):
-    """Read a key from /sys/class/hidraw/<node>/device/uevent."""
-    try:
-        with open(f"/sys/class/hidraw/{node}/device/uevent") as f:
-            for line in f:
-                k, _, v = line.strip().partition("=")
-                if k == name:
-                    return v
-    except OSError:
-        pass
-    return None
-
-
-def _is_hidpp_node(node):
-    """Logitech hidraw node whose report descriptor starts with vendor page 0xFF00."""
-    hid_id = _sysattr(node, "HID_ID")
-    if not hid_id or int(hid_id.split(":")[1], 16) != LOGITECH:
-        return False
-    try:
-        with open(f"/sys/class/hidraw/{node}/device/report_descriptor", "rb") as f:
-            return f.read(3) == b"\x06\x00\xff"
-    except OSError:
-        return False
-
-
-def _evdev_for(phys_prefix):
-    """The evdev node carrying the mouse buttons, found by its physical path."""
-    for path in evdev.list_devices():
-        d = evdev.InputDevice(path)
-        try:
-            if d.phys == phys_prefix or d.phys.startswith(phys_prefix + "/"):
-                keys = d.capabilities().get(evdev.ecodes.EV_KEY, [])
-                if evdev.ecodes.BTN_LEFT in keys:
-                    return path
-        finally:
-            d.close()
-    return None
 
 
 class Daemon:
     def __init__(self):
         self.cfg = config.load()
-        self.nodes = {}              # hidraw path -> HidppNode
-        self.mice = {}               # (hidraw path, devidx) -> LogitechMouse
+        self.nodes = {}              # hidraw path -> backend node handle
+        self.mice = {}               # (hidraw path, index) -> backends.base.Mouse
         self.focus = ("", "")        # (window class, caption)
         self.recent = []             # recently focused window classes, newest first
         self.override = None         # manually chosen profile, or None for automatic
@@ -85,46 +44,41 @@ class Daemon:
     async def scan(self):
         for sysdir in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
             node = os.path.basename(sysdir)
-            if f"/dev/{node}" not in self.nodes and _is_hidpp_node(node):
+            if f"/dev/{node}" not in self.nodes:
                 await self._probe(node)
 
     async def _probe(self, node):
+        """Offer the node to each backend; the first that recognises it drives it."""
         path = f"/dev/{node}"
-        try:
-            hn = HidppNode(path)
-        except OSError as e:
-            log.warning("%s: can't open (%s)", path, e)
-            return
-        name = _sysattr(node, "HID_NAME") or ""
-        phys = _sysattr(node, "HID_PHYS") or ""
-        receiver = "Receiver" in name
-        found = False
-        for idx in (range(1, 7) if receiver else (0xFF,)):
-            # A paired receiver slot has its own evdev node even while the mouse sleeps.
-            mouse_phys = f"{phys}:{idx}" if receiver else phys.rsplit("/", 1)[0]
-            ev = _evdev_for(mouse_phys)
-            if not ev:
+        hooks = Hooks(self._changed, self.bring_up, self._media, self.volume)
+        for backend in BACKENDS:
+            try:
+                found = backend.probe(node, hooks)
+            except OSError as e:
+                log.warning("%s: can't open (%s)", path, e)
+                return
+            if found is None:
                 continue
-            m = LogitechMouse(hn, idx, ev, self._changed, self.bring_up, self._media, self.volume)
-            self.mice[(path, idx)] = m
-            found = True
-            await self.bring_up(m)
-        if found:
-            self.nodes[path] = hn
-        else:
-            hn.close()
+            handle, mice = found
+            if not mice:
+                handle.close()
+                return
+            self.nodes[path] = handle
+            for idx, m in mice.items():
+                self.mice[(path, idx)] = m
+                await self.bring_up(m)
+            return
 
     async def bring_up(self, m):
         """Take the mouse over and apply its profile. Harmless if it's asleep; we retry on wake."""
         try:
             await m.start()
-        except (HidppError, TimeoutError, ConnectionError, OSError) as e:
-            log.info("%s idx %d: not answering yet (%s)", m.dev.node.path, m.dev.idx,
-                     str(e) or type(e).__name__)
+        except DEVICE_ERRORS as e:
+            log.info("%s: not answering yet (%s)", m.where, str(e) or type(e).__name__)
             m.watch_wake()
             return
         except Exception:               # a bug in one device's setup must not take the service down
-            log.exception("%s idx %d: setup failed", m.dev.node.path, m.dev.idx)
+            log.exception("%s: setup failed", m.where)
             return
         section, created = config.device_section(self.cfg, m.key, m.default_section())
         if created:
@@ -161,7 +115,7 @@ class Daemon:
             try:
                 await m.apply_profile(name, profile)
                 log.info("%s: profile %s", m.name, name)
-            except (HidppError, TimeoutError, ConnectionError, OSError) as e:
+            except DEVICE_ERRORS as e:
                 log.warning("%s: applying profile %s failed: %s", m.name, name, e)
 
     async def apply_all(self, force=False):
@@ -237,7 +191,7 @@ class Daemon:
                 try:
                     if await m.check():
                         await self.bring_up(m)
-                except (HidppError, TimeoutError, ConnectionError, OSError) as e:
+                except DEVICE_ERRORS as e:
                     log.warning("%s: health check failed: %s", m.name, e)
 
     async def udev_loop(self):

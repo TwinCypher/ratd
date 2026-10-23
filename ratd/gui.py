@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import config
-from .backends import logitech
+from . import backends
 
 BUS, PATH, IFACE = "org.ratd", "/org/ratd", "org.ratd.Manager"
 
@@ -1000,11 +1000,11 @@ class Window(QMainWindow):
             return ({b["id"]: b["label"] for b in live["buttons"]},
                     {b["id"]: b["default"] for b in live["buttons"]},
                     {b["id"] for b in live["buttons"] if b.get("locked")})
-        model = self.dkey.split(":", 1)[-1] if self.dkey else ""
-        names = logitech.MODELS.get(model)
-        if names:
-            return ({n: logitech.LABELS.get(n, n) for n in names},
-                    {n: logitech.DEFAULTS.get(n) for n in names}, {"left"})
+        tables = backends.model_tables(self.dkey) if self.dkey else None
+        if tables:
+            names, labels, defaults = tables
+            return ({n: labels.get(n, n) for n in names},
+                    {n: defaults.get(n) for n in names}, {"left"})
         sec = self._section()
         first = next(iter(sec["profiles"].values())) if sec else {}
         names = list(first.get("buttons", {}))

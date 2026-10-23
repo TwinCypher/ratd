@@ -9,6 +9,8 @@ import logging
 import os
 import struct
 
+from .errors import DeviceError
+
 log = logging.getLogger(__name__)
 
 SHORT, LONG = 0x10, 0x11
@@ -18,7 +20,7 @@ ERR_HIDPP10, ERR_HIDPP20 = 0x8F, 0xFF
 CONNECTION_NOTIFY = 0x41     # HID++ 1.0 receiver notification: device link up/down
 
 
-class HidppError(Exception):
+class HidppError(DeviceError):
     def __init__(self, code, feature, fn):
         super().__init__(f"HID++ error 0x{code:02x} (feature index 0x{feature:02x} fn {fn})")
         self.code = code

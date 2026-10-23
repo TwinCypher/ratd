@@ -2,6 +2,7 @@
 so every change is validated and applied by the daemon."""
 import copy
 import json
+import os
 import sys
 
 from evdev import ecodes as E
@@ -9,13 +10,14 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal, Slot
 from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QPen, QTransform
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QSpinBox,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QSizePolicy, QSpinBox,
     QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout,
     QWidget, QGridLayout,
 )
 
+from . import config
 from .backends import logitech
 
 BUS, PATH, IFACE = "org.ratd", "/org/ratd", "org.ratd.Manager"
@@ -165,7 +167,7 @@ class G502XDrawing:
 
 
 DRAWINGS = {"G502 X": G502XDrawing}
-BOX_W, BOX_H = 210, 46
+BOX_W, BOX_H = 196, 46
 
 
 class MouseDiagram(QWidget):
@@ -175,10 +177,14 @@ class MouseDiagram(QWidget):
         super().__init__()
         self.d = drawing
         self.setMouseTracking(True)
-        self.setMinimumSize(640, 450)
+        self.setMinimumSize(520, 380)
         self.buttons, self.actions, self.defaults = {}, {}, {}
         self.hover = None
         self.boxes = self._layout_boxes()
+        bounds = self.d.body.boundingRect()
+        for r in self.boxes.values():
+            bounds = bounds.united(r)
+        self.bounds = bounds.adjusted(-8, -8, 8, 8)      # fit what's drawn, not the whole model space
 
     def _layout_boxes(self):
         w, h = self.d.SIZE
@@ -186,7 +192,7 @@ class MouseDiagram(QWidget):
         for side, names in self.d.sides.items():
             gap = (h - 40) / len(names)
             for i, n in enumerate(names):
-                x = 16 if side == "left" else w - 16 - BOX_W
+                x = 232 - BOX_W if side == "left" else 560      # just clear of the body
                 boxes[n] = QRectF(x, 20 + gap * i + (gap - BOX_H) / 2, BOX_W, BOX_H)
         return boxes
 
@@ -195,11 +201,12 @@ class MouseDiagram(QWidget):
         self.update()
 
     def _transform(self):
-        w, h = self.d.SIZE
-        s = min(self.width() / w, self.height() / h)
+        b = self.bounds
+        s = min(self.width() / b.width(), self.height() / b.height())
         t = QTransform()
-        t.translate((self.width() - w * s) / 2, (self.height() - h * s) / 2)
+        t.translate((self.width() - b.width() * s) / 2, (self.height() - b.height() * s) / 2)
         t.scale(s, s)
+        t.translate(-b.left(), -b.top())
         return t
 
     def _hit(self, pos):
@@ -476,8 +483,10 @@ class DpiEditor(QWidget):
     def __init__(self):
         super().__init__()
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("DPI stages. DPI up/down and DPI cycle step through these; "
-                             "the selected one is where the profile starts."))
+        intro = QLabel("DPI stages. DPI up/down and DPI cycle step through these; "
+                       "the selected one is where the profile starts.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
         self.rows = QVBoxLayout()
         lay.addLayout(self.rows)
         add = QPushButton(QIcon.fromTheme("list-add"), "Add stage")
@@ -491,15 +500,27 @@ class DpiEditor(QWidget):
         self.sniper.setSuffix(" DPI")
         self.sniper.valueChanged.connect(self._sniper_changed)
         form.addRow("Sniper DPI (while held)", self.sniper)
+        self.rate = QComboBox()
+        self.rate.currentIndexChanged.connect(self._rate_changed)
+        self.rate.setToolTip("How often the mouse reports movement. Lower rates save some battery.")
+        form.addRow("Polling rate", self.rate)
         lay.addLayout(form)
         lay.addStretch()
         self.group = QButtonGroup(self)
         self.profile = None
         self.limits = (100, 44000)
 
-    def set_profile(self, profile, limits):
+    def set_profile(self, profile, limits, rates=()):
         self.profile, self.limits = profile, limits
         self._rebuild()
+        self.rate.blockSignals(True)
+        self.rate.clear()
+        rates = list(rates) or [125, 250, 500, 1000]
+        self.rate.addItem(f"Fastest ({rates[-1]} Hz)", None)
+        for hz in reversed(rates):
+            self.rate.addItem(f"{hz} Hz", hz)
+        self.rate.setCurrentIndex(max(0, self.rate.findData(profile.get("report_rate"))))
+        self.rate.blockSignals(False)
         self.sniper.blockSignals(True)
         self.sniper.setRange(*limits)
         self.sniper.setValue(profile.get("sniper_dpi", 400))
@@ -512,6 +533,7 @@ class DpiEditor(QWidget):
                 while item.layout().count():
                     w = item.layout().takeAt(0).widget()
                     if w:                      # stretch spacers have no widget
+                        w.hide()               # deleteLater waits for the event loop
                         w.deleteLater()
         for b in self.group.buttons():
             self.group.removeButton(b)
@@ -557,6 +579,16 @@ class DpiEditor(QWidget):
         self._rebuild()
         self.changed.emit()
 
+    def _rate_changed(self, _i):
+        if self.profile is None:
+            return
+        hz = self.rate.currentData()
+        if hz:
+            self.profile["report_rate"] = hz
+        else:
+            self.profile.pop("report_rate", None)
+        self.changed.emit()
+
     def _sniper_changed(self, v):
         if self.profile is not None:
             self.profile["sniper_dpi"] = v
@@ -569,8 +601,10 @@ class RulesEditor(QWidget):
     def __init__(self):
         super().__init__()
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("When a window matching a rule is focused, its profile is used. "
-                             "The first matching rule wins; anything else uses the default profile."))
+        intro = QLabel("When a window matching a rule is focused, its profile is used. "
+                       "The first matching rule wins; anything else uses the default profile.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["Window (class, * wildcards)", "Profile"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -683,7 +717,8 @@ class Window(QMainWindow):
         grid = QGridLayout()
         for i, (text, icon, fn) in enumerate((
                 ("New", "document-new", self._new), ("Duplicate", "edit-copy", self._duplicate),
-                ("Rename", "edit-rename", self._rename), ("Delete", "edit-delete", self._delete))):
+                ("Rename", "edit-rename", self._rename), ("Delete", "edit-delete", self._delete),
+                ("Import…", "document-import", self._import), ("Export…", "document-export", self._export))):
             b = QPushButton(QIcon.fromTheme(icon), text)
             b.clicked.connect(fn)
             grid.addWidget(b, i // 2, i % 2)
@@ -709,13 +744,19 @@ class Window(QMainWindow):
         self.tabs.addTab(self.buttons_page, QIcon.fromTheme("input-mouse"), "Buttons")
         self.dpi = DpiEditor()
         self.dpi.changed.connect(self._dirty)
-        self.tabs.addTab(self.dpi, QIcon.fromTheme("speedometer"), "DPI")
+        self.tabs.addTab(self.dpi, QIcon.fromTheme("speedometer"), "DPI && polling")
         self.rules = RulesEditor()
         self.rules.changed.connect(self._dirty)
         self.tabs.addTab(self.rules, QIcon.fromTheme("applications-games"), "Games / apps")
 
         bottom = QHBoxLayout()
+        self.notify_battery = QCheckBox("Low battery alerts")
+        self.notify_battery.setToolTip("Desktop notification when the battery drops to 15% and 5%")
+        self.notify_battery.toggled.connect(self._notify_toggled)
+        bottom.addWidget(self.notify_battery)
+        bottom.addSpacing(12)
         self.hint = QLabel("")
+        self.hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)    # long paths mustn't widen the window
         bottom.addWidget(self.hint, 1)
         self.revert = QPushButton(QIcon.fromTheme("edit-undo"), "Revert")
         self.revert.clicked.connect(self.load)
@@ -744,6 +785,9 @@ class Window(QMainWindow):
             QMessageBox.critical(self, "ratd", f"Can't reach the ratd service:\n{e}")
             self.cfg = {"version": 1, "rules": [], "devices": {}}
         self.saved = copy.deepcopy(self.cfg)
+        self.notify_battery.blockSignals(True)
+        self.notify_battery.setChecked(self.cfg.get("notify_low_battery", True))
+        self.notify_battery.blockSignals(False)
         keep = self.dkey
         self.device.blockSignals(True)
         self.device.clear()
@@ -836,7 +880,7 @@ class Window(QMainWindow):
         target.set_profile(labels, prof.setdefault("buttons", {}), defaults)
         live = self._live()
         limits = (live["dpi_min"], live["dpi_max"]) if live and live.get("dpi_min") else (100, 44000)
-        self.dpi.set_profile(prof, limits)
+        self.dpi.set_profile(prof, limits, live.get("report_rates", []) if live else [])
         self.rules.set_data(self.cfg, list(sec["profiles"]), self.state.get("recent", []))
         self.make_default.setEnabled(name != sec["default_profile"])
 
@@ -850,7 +894,8 @@ class Window(QMainWindow):
         else:
             batt = f" · battery {live['battery']}%" if live.get("battery") is not None else ""
             why = "forced" if st.get("override") else (f"for {st['focus']['class']}" if st["focus"]["class"] else "default")
-            self.status.setText(f"{live['name']} · {live['dpi']} DPI{batt} · using <b>{live['profile']}</b> ({why})")
+            rate = f" · {live['report_rate']} Hz" if live.get("report_rate") else ""
+            self.status.setText(f"{live['dpi']} DPI{rate}{batt} · using <b>{live['profile']}</b> ({why})")
         if self.cfg == self.saved:                    # don't disturb unsaved edits
             self._fill_profiles()
 
@@ -945,6 +990,77 @@ class Window(QMainWindow):
             QMessageBox.information(self, "Unsaved changes", "Apply your changes first.")
             return
         self._try(lambda: self.svc.set_profile(cur))
+
+    def _notify_toggled(self, on):
+        self.cfg["notify_low_battery"] = on
+        self._dirty()
+
+    def _export(self):
+        sec, cur = self._section(), self._pname()
+        if not sec or not cur:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export profile",
+                                              os.path.expanduser(f"~/{cur}.ratd.json"),
+                                              "ratd profile (*.ratd.json *.json)")
+        if not path:
+            return
+        data = {"ratd_profile": 1, "model": self.dkey.split(":", 1)[-1], "name": cur,
+                "profile": sec["profiles"][cur],
+                "rules": [r["match"] for r in self.cfg["rules"] if r["profile"] == cur]}
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+        except OSError as e:
+            QMessageBox.critical(self, "Export profile", str(e))
+            return
+        self.hint.setText(f"Exported “{cur}” to {path}")
+
+    def _import(self):
+        sec = self._section()
+        if not sec:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Import profile", os.path.expanduser("~"),
+                                              "ratd profile (*.ratd.json *.json)")
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if data.get("ratd_profile") != 1 or not isinstance(data.get("profile"), dict):
+                raise ValueError("not a ratd profile export")
+        except (OSError, ValueError, AttributeError) as e:
+            QMessageBox.critical(self, "Import profile", f"Can't read {path}:\n{e}")
+            return
+        model = self.dkey.split(":", 1)[-1]
+        if data.get("model") != model and QMessageBox.question(
+                self, "Import profile",
+                f"This profile was made for a {data.get('model')}, not a {model}. Import it anyway? "
+                "Buttons this mouse doesn't have are dropped.") != QMessageBox.Yes:
+            return
+        labels, _d, _l = self._button_info()
+        prof = copy.deepcopy(data["profile"])
+        prof["buttons"] = {b: prof.get("buttons", {}).get(b, {"type": "default"}) for b in labels}
+        name = str(data.get("name") or "Imported")
+        if name in sec["profiles"]:
+            name = self._ask_name("Import profile", name + " (imported)")
+            if not name or name in sec["profiles"]:
+                return
+        trial = copy.deepcopy(self.cfg)
+        trial["devices"][self.dkey]["profiles"][name] = prof
+        known = {r["match"] for r in trial["rules"]}
+        added = [m for m in data.get("rules", []) if isinstance(m, str) and m not in known]
+        trial["rules"] += [{"match": m, "profile": name} for m in added]
+        try:
+            config.validate(trial)
+        except config.ConfigError as e:
+            QMessageBox.critical(self, "Import profile", f"That profile isn't valid:\n{e}")
+            return
+        self.cfg = trial
+        self._fill_profiles(name)
+        self._dirty()
+        if added:
+            self.hint.setText(f"Imported “{name}” with rules: {', '.join(added)}")
 
     def _ask_name(self, title, text):
         name, ok = QInputDialog.getText(self, title, "Profile name:", text=text)

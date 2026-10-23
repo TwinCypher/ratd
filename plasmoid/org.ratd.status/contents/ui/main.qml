@@ -147,6 +147,8 @@ PlasmoidItem {
 
             PlasmaComponents.Label { text: "DPI"; opacity: 0.7 }
             PlasmaComponents.Label { text: root.device && root.device.dpi ? root.device.dpi : "-" }
+            PlasmaComponents.Label { text: "Polling"; opacity: 0.7 }
+            PlasmaComponents.Label { text: root.device && root.device.report_rate ? root.device.report_rate + " Hz" : "-" }
             PlasmaComponents.Label { text: "Battery"; opacity: 0.7 }
             PlasmaComponents.Label {
                 text: root.device && root.device.battery !== null

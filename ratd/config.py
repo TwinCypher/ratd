@@ -3,12 +3,14 @@
 Layout:
 {
   "version": 1,
+  "notify_low_battery": true,                                     # optional, default true
   "rules": [{"match": "overwatch.exe", "profile": "Overwatch"}],   # window class glob
   "devices": {
     "<device key>": {
       "default_profile": "Desktop",
       "profiles": {
         "Desktop": {"dpi": [800, 1600, 3200], "dpi_index": 1, "sniper_dpi": 400,
+                    "report_rate": 500,                  # optional Hz; unset = fastest
                     "buttons": {"back": {"type": "default"}, ...}}
       }
     }
@@ -69,6 +71,8 @@ def save(cfg):
 def validate(cfg):
     if not isinstance(cfg, dict) or cfg.get("version") != 1:
         raise ConfigError("config must be an object with version 1")
+    if not isinstance(cfg.get("notify_low_battery", True), bool):
+        raise ConfigError("notify_low_battery must be true or false")
     for i, rule in enumerate(cfg.get("rules", [])):
         if not isinstance(rule.get("match"), str) or not isinstance(rule.get("profile"), str):
             raise ConfigError(f"rule {i}: needs string 'match' and 'profile'")
@@ -85,6 +89,8 @@ def validate(cfg):
                 raise ConfigError(f"{where}: dpi_index out of range")
             if "sniper_dpi" in p and not (isinstance(p["sniper_dpi"], int) and 50 <= p["sniper_dpi"] <= 50000):
                 raise ConfigError(f"{where}: bad sniper_dpi")
+            if "report_rate" in p and p["report_rate"] not in (125, 250, 500, 1000, 2000, 4000, 8000):
+                raise ConfigError(f"{where}: report_rate must be 125-8000 Hz")
             for bname, act in p.get("buttons", {}).items():
                 _validate_action(f"{where} / {bname}", bname, act)
 

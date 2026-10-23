@@ -206,6 +206,8 @@ class Daemon:
         for limit in LOW_BATTERY:
             if pct <= limit and (last is None or last > limit):
                 self._battery_warned[m.key] = limit
+                if not self.cfg.get("notify_low_battery", True):
+                    break
                 asyncio.get_running_loop().create_task(self._notify(
                     f"{m.name} battery low", f"{pct}% remaining"))
                 break

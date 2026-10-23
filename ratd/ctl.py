@@ -23,7 +23,8 @@ def _print_state(s):
     for d in s["devices"]:
         batt = f"{d['battery']}% {d['battery_status']}" if d["battery"] is not None else "?"
         state = "connected" if d["connected"] else "asleep/offline"
-        print(f"{d['name']}: {state}, profile {d['profile']}, {d['dpi']} DPI, battery {batt}")
+        rate = f", {d['report_rate']} Hz" if d.get("report_rate") else ""
+        print(f"{d['name']}: {state}, profile {d['profile']}, {d['dpi']} DPI{rate}, battery {batt}")
 
 
 async def main(argv):

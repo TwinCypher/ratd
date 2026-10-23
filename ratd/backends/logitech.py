@@ -18,10 +18,11 @@ from ..hidpp import HidppDevice, HidppError, CONNECTION_NOTIFY, SHORT
 
 log = logging.getLogger(__name__)
 
-ONBOARD, SPY, EXT_DPI, BATTERY = 0x8100, 0x8110, 0x2202, 0x1004
+ONBOARD, SPY, EXT_DPI, BATTERY, REPORT_RATE = 0x8100, 0x8110, 0x2202, 0x1004, 0x8061
 MODE_ONBOARD, MODE_HOST = 1, 2
 BATTERY_STATUS = {0: "discharging", 1: "charging", 2: "almost full", 3: "full",
                   4: "slow charging", 5: "invalid battery", 6: "thermal error"}
+RATE_HZ = [125, 250, 500, 1000, 2000, 4000, 8000]    # 0x8061 rate index -> Hz
 
 # Button index (= spy bit = HID button usage - 1) -> name, per model.
 MODELS = {
@@ -82,6 +83,8 @@ class LogitechMouse:
         self.connected = False
         self.battery = None                 # (percent, status string)
         self.dpi = None
+        self.report_rate = None             # Hz, None if the mouse can't report it
+        self.rate_choices = []              # supported polling rates in Hz, ascending
         self.profile_name = None
         self._profile = None
         self._dpi_index = 0
@@ -116,7 +119,8 @@ class LogitechMouse:
         return {"key": self.key, "name": self.name, "connected": self.connected,
                 "battery": self.battery[0] if self.battery else None,
                 "battery_status": self.battery[1] if self.battery else None,
-                "dpi": self.dpi, "profile": self.profile_name,
+                "dpi": self.dpi, "report_rate": self.report_rate, "report_rates": self.rate_choices,
+                "profile": self.profile_name,
                 "model": self.model,
                 "buttons": [{"id": b, "label": LABELS.get(b, b),
                              "default": DEFAULTS.get(b) if self.model else None,
@@ -154,6 +158,7 @@ class LogitechMouse:
             await self.dev.call(SPY, 1)
             self.connected = True
             self._unwatch_wake()
+            await self._read_rates()
             await self._read_battery()
             if self._profile:
                 await self._apply(self._profile, keep_dpi=True)
@@ -260,6 +265,7 @@ class LogitechMouse:
             else:                           # none, or handled by us from spy
                 code = E.KEY_RESERVED
             self.keymap.set(sc, code)
+        await self._set_rate(profile.get("report_rate"))
         await self._set_dpi()
 
     def _current_dpi(self):
@@ -375,6 +381,31 @@ class LogitechMouse:
             await self._set_dpi()
         except (HidppError, TimeoutError, ConnectionError) as e:
             log.warning("%s: DPI change failed: %s", self.name, e)
+
+    async def _read_rates(self):
+        try:
+            supported = struct.unpack(">H", (await self.dev.call(REPORT_RATE, 1))[:2])[0]
+        except (HidppError, TimeoutError) as e:
+            log.debug("%s: report rate unavailable: %s", self.name, e)
+            return
+        self.rate_choices = [hz for i, hz in enumerate(RATE_HZ) if supported >> i & 1]
+        # fn2 (getReportRate) on the G502 X keeps answering 1000 Hz whatever was set, so
+        # treat the rate as unknown after every takeover and let the profile write it.
+        self.report_rate = None
+
+    async def _set_rate(self, hz=None):
+        """Profile's polling rate (nearest supported at or below it), or the fastest if unset."""
+        if not self.rate_choices:
+            return
+        hz = max([c for c in self.rate_choices if c <= hz] or self.rate_choices[:1]) if hz else self.rate_choices[-1]
+        if hz != self.report_rate:
+            try:
+                await self.dev.call(REPORT_RATE, 3, bytes([RATE_HZ.index(hz)]))
+            except (HidppError, TimeoutError) as e:
+                log.warning("%s: setting polling rate failed: %s", self.name, e)
+                return
+            log.info("%s: polling rate %s -> %d Hz", self.name, self.report_rate, hz)
+            self.report_rate = hz
 
     async def _read_battery(self):
         try:

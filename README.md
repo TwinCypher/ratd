@@ -19,12 +19,14 @@ like. ratd never rewrites the mouse's onboard profiles.
   games running under Proton (tested via Heroic).
 - **Any button → anything.** A key, a key combo (Ctrl+Z), another mouse button, DPI
   up/down/cycle, a sniper button (hold for low DPI), horizontal scroll, or a shell command.
-- **DPI stages per profile**, set live on the sensor.
+- **DPI stages and polling rate per profile**, set live on the sensor. Polling defaults to the
+  fastest the mouse supports; drop it on the desktop profile to save some battery.
 - **Panel widget** showing the active profile, current DPI and battery, with a popup to force
   a profile.
 - **Settings window** with a drawing of the mouse and callout lines to each button's binding
   (G Hub style). Click a button to change it; press the key you want to bind.
-- **Low-battery notifications**, sleep/wake handling, and wired and wireless both work.
+- **Profile export/import** as `.ratd.json` files, including the game rules that use them.
+- **Low-battery notifications** (can be turned off), sleep/wake handling, and wired and wireless both work.
 - **`ratctl`** for the terminal: `status`, `profile NAME|auto`, `dpi N`, `reload`, `watch`.
 
 ## How it works
@@ -98,6 +100,7 @@ profile looks like this:
 ```json
 "Overwatch": {
   "dpi": [1100, 1600, 2000], "dpi_index": 1,
+  "report_rate": 1000,
   "buttons": {
     "sniper":     {"type": "key", "key": "KEY_V"},
     "tilt_left":  {"type": "key", "key": "KEY_KP3"},
@@ -118,6 +121,9 @@ Action types:
 | `dpi` | `action`: `cycle` / `up` / `down` / `shift` (sniper) |
 | `scroll` | `direction`: `left` / `right` |
 | `command` | `command` |
+
+`report_rate` is in Hz (125, 250, 500, 1000, ...); leave it out to use the fastest the mouse
+supports. A top-level `"notify_low_battery": false` turns off the 15% / 5% battery alerts.
 
 Rules are global, `{"match": "overwatch*", "profile": "Overwatch"}`, and match the window
 class with `*` wildcards. **Mouse Settings → Games / apps → Add from recent windows** fills

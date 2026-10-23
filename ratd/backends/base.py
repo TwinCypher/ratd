@@ -215,6 +215,13 @@ class Mouse:
         self.vkbd.close()
         await self._hand_back()
 
+    def detach(self):
+        """The device is gone: drop our handles without trying to talk to it."""
+        self._unwatch_wake()
+        if self.keymap:
+            self.keymap.close()
+            self.keymap = None
+
     def restore_keymap(self):
         for i in range(len(self.buttons)):
             self._remap(i, self.native_code(i))
@@ -246,7 +253,7 @@ class Mouse:
         act = self._action(self.buttons[i])
         if act["type"] == "default":
             return self.native_code(i)
-        if act["type"] == "key" and self._kernel_can(act["key"]) and not self._pinned_volume([act["key"]]):
+        if act["type"] == "key" and self._kernel_can(self.buttons[i], act["key"]) and not self._pinned_volume([act["key"]]):
             return keymap.keycode(act["key"])
         return E.KEY_RESERVED               # none, or handled by us from the backend's events
 
@@ -281,7 +288,8 @@ class Mouse:
 
     # ---- button actions --------------------------------------------------------
 
-    def _kernel_can(self, key):
+    def _kernel_can(self, name, key):
+        """Can button `name` send `key` through the kernel keymap (else it goes via uinput)?"""
         return self.kernel_keys or key.upper().startswith("BTN_")
 
     def _action(self, name):
@@ -309,7 +317,7 @@ class Mouse:
             self._hold(name, act, down)
             return
         # Shifted buttons are disabled in the keymap, so even plain keys go through uinput.
-        if t == "key" and (shifted or not self._kernel_can(act["key"])):
+        if t == "key" and (shifted or not self._kernel_can(name, act["key"])):
             t, act = "keys", {"type": "keys", "keys": [act["key"]]}
         if t in KERNEL_TYPES or t == "default":
             return

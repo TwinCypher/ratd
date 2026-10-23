@@ -89,9 +89,7 @@ class Daemon:
     def forget(self, path):
         for key in [k for k in self.mice if k[0] == path]:
             m = self.mice.pop(key)
-            if m.keymap:
-                m.keymap.close()
-                m.keymap = None
+            m.detach()
             log.info("%s: removed", m.name)
         hn = self.nodes.pop(path, None)
         if hn:

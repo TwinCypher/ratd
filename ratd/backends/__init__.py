@@ -1,8 +1,8 @@
 """Mouse backends. Each module provides probe(hidraw node name, base.Hooks), returning
 (node handle with close(), {index: Mouse}) for a node it drives, or None to pass."""
-from . import logitech
+from . import g600, logitech
 
-BACKENDS = [logitech]
+BACKENDS = [logitech, g600]
 
 
 def model_tables(key):

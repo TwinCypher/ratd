@@ -6,10 +6,12 @@ replacement for Logitech G Hub (Windows-only) and for Solaar/Piper, which on Lin
 limited and hit-or-miss for this mouse.
 
 Built for KDE Plasma 6 on Wayland. Profiles live on your PC, so you can have as many as you
-like. ratd never rewrites the mouse's onboard profiles.
+like. ratd never rewrites a HID++ mouse's onboard profiles. The G600 is the exception: it
+has no host mode, so ratd uses its third onboard slot (see below).
 
-> **Hardware supported today:** Logitech **G502 X** (Lightspeed wireless, and wired over USB).
-> Other Logitech HID++ 2.0 gaming mice will probably work, with generic button names.
+> **Hardware supported today:** Logitech **G502 X** (Lightspeed wireless, and wired over USB)
+> and Logitech **G600** (wired). Other Logitech HID++ 2.0 gaming mice will probably work, with
+> generic button names.
 > Other brands need a new backend; see [Adding your own mouse](#adding-your-own-mouse).
 
 ## What you get
@@ -51,6 +53,18 @@ the kernel table and switches the mouse back to onboard mode, so with ratd stopp
 behaves as it would without ratd. If ratd crashes instead, the mouse stays in host mode with
 the last kernel remap: single-key bindings keep working, while combos, DPI and scroll don't.
 systemd restarts the service about 2 seconds later and it takes the mouse over again.
+
+**The G600** predates HID++ and has no host mode, so ratd writes its own onboard profile into
+the mouse's **third slot** (overwriting whatever was there) and activates it. In that profile
+left/right/middle, the wheel tilts and G9-G19 report as mouse buttons 1-16, and G-Shift, G7,
+G8 and G20 as F13-F16 on the mouse's keyboard interface. The kernel remap works as above. A
+blanked button is invisible to evdev, so instead of a spy feature ratd reads presses from the
+raw HID reports on `/dev/hidraw`. DPI steps are the profile's four onboard DPI slots, and
+switching between them is instant. A DPI that isn't in a slot, or a profile with different
+slots or polling rate, means rewriting the profile, which takes a few seconds: the mouse has
+to be left alone for about 2 s around a flash write, or it stores the profile a byte off.
+On first start the G600's config is translated from the onboard profile that was active,
+and stopping the service switches back to it.
 
 ## Requirements
 
@@ -185,9 +199,12 @@ The service is split so that a mouse is one backend file. Two cases:
 (Mouse Button Spy) and `0x2202` (extended DPI). A HID++ feature dump tells you whether you
 have them.
 
-**A different brand:** write a backend with the same shape as `LogitechMouse`:
-`start()`, `stop()`, `check()`, `apply_profile()`, `set_dpi()` and `state()`, and register its
-discovery in `daemon.py`. The protocol usually comes from an existing open-source driver
+**A different mouse:** write a backend module with a `probe(node, hooks)` function and a
+subclass of `Mouse` (`ratd/backends/base.py`), and add the module to `BACKENDS` in
+`ratd/backends/__init__.py`. The base class already does bindings, the hold layer and DPI
+stepping; the backend implements the hardware hooks listed in it (`start()`, `check()`,
+`_write_dpi()` and so on) and feeds button presses to `_button()`. `g600.py` is the example
+for a mouse without host mode. The protocol usually comes from an existing open-source driver
 (OpenRGB, libratbag), or from USB captures of the vendor's Windows software in a VM
 (Wireshark + USBPcap). The design of in-kernel keymap plus a handler for everything else
 carries over to any mouse whose buttons can be made to report individually.
@@ -197,7 +214,9 @@ carries over to any mouse whose buttons can be made to report individually.
 | Path | What |
 |---|---|
 | `ratd/daemon.py` | the service: discovery, profile switching, D-Bus `org.ratd` |
+| `ratd/backends/base.py` | what every mouse shares: bindings, hold layer, DPI stepping |
 | `ratd/backends/logitech.py` | HID++ backend and per-model button tables |
+| `ratd/backends/g600.py` | Logitech G600 backend (onboard-profile takeover, hidraw spy) |
 | `ratd/hidpp.py` | async HID++ 2.0 transport over `/dev/hidraw` |
 | `ratd/keymap.py` | kernel scancode remapping and the uinput device |
 | `ratd/config.py` | config schema and validation |
@@ -209,7 +228,10 @@ carries over to any mouse whose buttons can be made to report individually.
 
 ## Caveats
 
-- Tested on one G502 X, on Arch with Plasma 6.8 and Wayland. Treat other setups as untested.
+- Tested on one G502 X and one G600, on Arch with Plasma 6.8 and Wayland. Treat other setups
+  as untested.
+- The G600's third onboard profile slot belongs to ratd once it has run. Save it first (for
+  example with libratbag) if you want to keep what's there.
 - Not affiliated with or endorsed by Logitech. The protocol details come from open-source
   work (Solaar, libratbag) and from probing the mouse.
 - Mouse Button Spy (`0x8110`) is undocumented. It works on the G502 X; behaviour on other

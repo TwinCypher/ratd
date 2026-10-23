@@ -121,9 +121,42 @@ Action types:
 | `dpi` | `action`: `cycle` / `up` / `down` / `shift` (sniper) |
 | `scroll` | `direction`: `left` / `right` |
 | `command` | `command` |
+| `media` | `action`: `playpause` / `next` / `previous` / `stop`, sent to a media player over MPRIS |
+| `shift` | none: the hold button for the profile's second layer (any button can be it) |
 
 `report_rate` is in Hz (125, 250, 500, 1000, ...); leave it out to use the fastest the mouse
 supports. A top-level `"notify_low_battery": false` turns off the 15% / 5% battery alerts.
+
+A profile's optional `"shift"` section holds a second set of bindings that apply while its
+hold button (whichever button has `{"type": "shift"}`) is held, e.g. hold sniper + wheel
+for volume:
+
+```json
+"buttons": {"sniper": {"type": "shift"}},
+"shift": {"middle":     {"type": "media", "action": "playpause"},
+          "wheel_up":   {"type": "key", "key": "KEY_VOLUMEUP"},
+          "wheel_down": {"type": "key", "key": "KEY_VOLUMEDOWN"}}
+```
+
+Buttons not listed keep their normal binding. `wheel_up` / `wheel_down` fire once per
+notch; the wheel is only taken over (HID++ 0x2121) while the hold button is down and the
+layer binds it, so normal scrolling is untouched. In the GUI: Buttons tab → pick a
+**Hold button**, then **While holding …** to edit the second layer.
+
+Volume keys normally change Plasma's default output, which follows whatever device was used
+last. A top-level `"volume_device": "<sink name>"` (from `pactl list sinks short`) pins them
+to one output: the mouse's `KEY_VOLUMEUP` / `KEY_VOLUMEDOWN` / `KEY_MUTE` bindings, plus the
+volume keys or knob of every input device named in `"volume_keyboards"`, e.g.
+`["BY Tech Gaming Keyboard Consumer Control"]`. ratd grabs those devices and passes their
+other keys through unchanged; devices not listed (a headset's own dial) are left alone.
+Steps are `"volume_step"` percent (default 5), capped at 100%, with Plasma's volume popup.
+In the GUI: **Volume keys control** and **Keyboards…** at the bottom of the window.
+
+Media buttons pick the player themselves rather than leaving it to the desktop: a playing
+player first, else the one used last. A top-level `"media_ignore": ["firefox", "chromium"]`
+skips players whose bus name, name or desktop file contains one of the words, so browser
+tabs never steal the buttons (`firefox` covers LibreWolf, `chromium` covers Helium, Chrome
+and Brave). Volume and mute are plain keys (`KEY_VOLUMEUP`, `KEY_MUTE`).
 
 Rules are global, `{"match": "overwatch*", "profile": "Overwatch"}`, and match the window
 class with `*` wildcards. **Mouse Settings → Games / apps → Add from recent windows** fills

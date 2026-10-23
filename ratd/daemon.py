@@ -14,6 +14,8 @@ from dbus_next.aio import MessageBus
 from dbus_next.service import ServiceInterface, method, signal as dbus_signal
 
 from . import config
+from .media import Media
+from .volume import Volume
 from .backends.logitech import LogitechMouse
 from .hidpp import HidppNode, HidppError
 
@@ -73,6 +75,8 @@ class Daemon:
         self.recent = []             # recently focused window classes, newest first
         self.override = None         # manually chosen profile, or None for automatic
         self.iface = None
+        self.media = None
+        self.volume = None
         self._battery_warned = {}
         self._apply_tasks = set()
 
@@ -101,7 +105,7 @@ class Daemon:
             ev = _evdev_for(mouse_phys)
             if not ev:
                 continue
-            m = LogitechMouse(hn, idx, ev, self._changed, self.bring_up)
+            m = LogitechMouse(hn, idx, ev, self._changed, self.bring_up, self._media, self.volume)
             self.mice[(path, idx)] = m
             found = True
             await self.bring_up(m)
@@ -193,6 +197,10 @@ class Daemon:
             self._check_battery(m)
         self._emit()
 
+    async def _media(self, action):
+        if self.media:
+            await self.media.control(action)
+
     def _emit(self):
         if self.iface:
             self.iface.StateChanged(json.dumps(self.state()))
@@ -236,6 +244,7 @@ class Daemon:
         ctx = pyudev.Context()
         mon = pyudev.Monitor.from_netlink(ctx)
         mon.filter_by("hidraw")
+        mon.filter_by("input")              # keyboards whose volume keys we may take over
         mon.start()
         loop = asyncio.get_running_loop()
         queue = asyncio.Queue()
@@ -244,6 +253,11 @@ class Daemon:
             dev = await queue.get()
             if dev is None:
                 continue
+            if dev.subsystem == "input":
+                if dev.action == "add" and (dev.device_node or "").startswith("/dev/input/event"):
+                    await asyncio.sleep(0.3)
+                    self.volume.refresh()
+                continue
             if dev.action == "add":
                 await asyncio.sleep(1.0)      # let evdev nodes appear too
                 await self.scan()
@@ -251,6 +265,7 @@ class Daemon:
                 self.forget(dev.device_node)
 
     async def shutdown(self):
+        self.volume.tap.refresh(False)
         for m in self.mice.values():
             await m.stop()
         for hn in self.nodes.values():
@@ -279,6 +294,7 @@ class Manager(ServiceInterface):
         except (ValueError, config.ConfigError) as e:
             return str(e)
         self.d.cfg = cfg
+        self.d.volume.refresh()
         self.d.schedule_apply(force=True)
         return ""
 
@@ -288,6 +304,7 @@ class Manager(ServiceInterface):
             self.d.cfg = config.load()
         except (ValueError, config.ConfigError) as e:
             return str(e)
+        self.d.volume.refresh()
         self.d.schedule_apply(force=True)
         return ""
 
@@ -363,6 +380,9 @@ async def main():
     d = Daemon()
     bus = await MessageBus(bus_type=BusType.SESSION).connect()
     d.iface = Manager(d)
+    d.media = Media(bus, lambda: d.cfg.get("media_ignore", []))
+    d.volume = Volume(bus, lambda: d.cfg)
+    d.volume.refresh()
     bus.export(OBJ_PATH, d.iface)
     reply = await bus.request_name(BUS_NAME)
     if reply.value not in (1, 4):     # primary owner / already owner

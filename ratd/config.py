@@ -11,7 +11,10 @@ Layout:
       "profiles": {
         "Desktop": {"dpi": [800, 1600, 3200], "dpi_index": 1, "sniper_dpi": 400,
                     "report_rate": 500,                  # optional Hz; unset = fastest
-                    "buttons": {"back": {"type": "default"}, ...}}
+                    "buttons": {"back": {"type": "default"}, ...},
+                    # optional: bindings while a {"type": "shift"} button is held; buttons
+                    # not listed keep their normal binding. wheel_up / wheel_down = per notch.
+                    "shift": {"middle": {"type": "media", "action": "playpause"}, ...}}
       }
     }
   }
@@ -21,10 +24,16 @@ Button actions:
   {"type": "default"}                          the button's normal function
   {"type": "none"}                             disabled
   {"type": "key",  "key": "KEY_V"}             one key or mouse button (BTN_*), remapped in-kernel
+                                               (volume keys too: KEY_VOLUMEUP, KEY_MUTE, ...)
   {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Z"]}   combo, sent via uinput
   {"type": "dpi",  "action": "cycle"|"up"|"down"|"shift"}
   {"type": "scroll", "direction": "left"|"right"}    horizontal scroll, repeats while held
   {"type": "command", "command": "notify-send hi"}   run on press
+  {"type": "shift"}                            hold for the profile's shift layer
+  {"type": "media", "action": "playpause"|"next"|"previous"|"stop"}
+                                               sent to a media player over MPRIS, skipping
+                                               the apps in the top-level "media_ignore"
+                                               list (e.g. ["firefox", "chromium"])
 """
 import copy
 import fnmatch
@@ -35,8 +44,9 @@ import tempfile
 from . import keymap
 
 PATH = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "ratd", "config.json")
-ACTION_TYPES = {"default", "none", "key", "keys", "dpi", "scroll", "command"}
+ACTION_TYPES = {"default", "none", "key", "keys", "dpi", "scroll", "command", "media", "shift"}
 DPI_ACTIONS = {"cycle", "up", "down", "shift"}
+MEDIA_ACTIONS = {"playpause", "next", "previous", "stop"}
 LOCKED_BUTTONS = {"left"}          # never remappable, so the mouse can't be made unusable
 
 
@@ -73,6 +83,17 @@ def validate(cfg):
         raise ConfigError("config must be an object with version 1")
     if not isinstance(cfg.get("notify_low_battery", True), bool):
         raise ConfigError("notify_low_battery must be true or false")
+    vd = cfg.get("volume_device")
+    if vd is not None and not (isinstance(vd, str) and vd):
+        raise ConfigError("volume_device must be a sink name, or null for the default output")
+    if not (isinstance(cfg.get("volume_step", 5), int) and 1 <= cfg.get("volume_step", 5) <= 25):
+        raise ConfigError("volume_step must be 1-25 (percent)")
+    kb = cfg.get("volume_keyboards", [])
+    if not isinstance(kb, list) or not all(isinstance(s, str) for s in kb):
+        raise ConfigError("volume_keyboards must be a list of input device names")
+    ign = cfg.get("media_ignore", [])
+    if not isinstance(ign, list) or not all(isinstance(s, str) for s in ign):
+        raise ConfigError("media_ignore must be a list of app names")
     for i, rule in enumerate(cfg.get("rules", [])):
         if not isinstance(rule.get("match"), str) or not isinstance(rule.get("profile"), str):
             raise ConfigError(f"rule {i}: needs string 'match' and 'profile'")
@@ -93,6 +114,12 @@ def validate(cfg):
                 raise ConfigError(f"{where}: report_rate must be 125-8000 Hz")
             for bname, act in p.get("buttons", {}).items():
                 _validate_action(f"{where} / {bname}", bname, act)
+            if not isinstance(p.get("shift", {}), dict):
+                raise ConfigError(f"{where}: 'shift' must map buttons to actions")
+            for bname, act in p.get("shift", {}).items():
+                _validate_action(f"{where} / shift / {bname}", bname, act)
+                if act["type"] == "shift":
+                    raise ConfigError(f"{where} / shift / {bname}: can't shift inside the shift layer")
 
 
 def _validate_action(where, bname, act):
@@ -117,6 +144,8 @@ def _validate_action(where, bname, act):
         raise ConfigError(f"{where}: scroll direction must be 'left' or 'right'")
     if t == "command" and not str(act.get("command", "")).strip():
         raise ConfigError(f"{where}: empty command")
+    if t == "media" and act.get("action") not in MEDIA_ACTIONS:
+        raise ConfigError(f"{where}: media action must be one of {sorted(MEDIA_ACTIONS)}")
 
 
 def match_rule(cfg, window_class, caption=""):

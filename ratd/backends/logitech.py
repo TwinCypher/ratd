@@ -4,6 +4,10 @@ Host mode (0x8100 onboard profiles -> mode 2) stops the mouse running its onboar
 bindings; every button then arrives at the kernel as its own evdev button, which we
 remap in-kernel. Bindings the kernel can't express are disabled in the keymap and
 handled from Mouse Button Spy (0x8110) presses instead.
+
+While a "shift" button is held, buttons with a binding in the profile's shift layer are
+disabled in the keymap too, and the wheel is diverted to us (0x2121 target bit) if the
+layer binds it, so wheel notches arrive as HID++ events instead of scrolling.
 """
 import asyncio
 import logging
@@ -19,6 +23,8 @@ from ..hidpp import HidppDevice, HidppError, CONNECTION_NOTIFY, SHORT
 log = logging.getLogger(__name__)
 
 ONBOARD, SPY, EXT_DPI, BATTERY, REPORT_RATE = 0x8100, 0x8110, 0x2202, 0x1004, 0x8061
+HIRES_WHEEL = 0x2121
+WHEEL_DIVERT = 0x01                 # 0x2121 mode bit: wheel reports go to HID++, not HID
 MODE_ONBOARD, MODE_HOST = 1, 2
 BATTERY_STATUS = {0: "discharging", 1: "charging", 2: "almost full", 3: "full",
                   4: "slow charging", 5: "invalid battery", 6: "thermal error"}
@@ -47,6 +53,7 @@ DEFAULTS = {
     "sniper": {"type": "dpi", "action": "shift"}, "top": {"type": "dpi", "action": "cycle"},
 }
 KERNEL_TYPES = {"none", "key"}
+WHEEL = ("wheel_up", "wheel_down")  # shift-layer only: one action per wheel notch
 SCROLL_REPEAT = (0.30, 0.08)   # first repeat delay, then interval, while a tilt is held
 
 
@@ -70,11 +77,13 @@ def parse_dpi_list(raw):
 class LogitechMouse:
     """One connected mouse. The daemon owns lifecycle; we own the hardware state."""
 
-    def __init__(self, node, devidx, evdev_path, on_change, on_wake):
+    def __init__(self, node, devidx, evdev_path, on_change, on_wake, on_media, volume=None):
         self.dev = HidppDevice(node, devidx)
         self.evdev_path = evdev_path
         self.on_change = on_change          # callback(self) when state changes
         self.on_wake = on_wake              # coroutine fn(self) when the link comes up
+        self.on_media = on_media            # coroutine fn(action) for media buttons
+        self.volume = volume                # volume.Volume: takes volume keys when pinned to a device
         self.keymap = None
         self.vkbd = keymap.VirtualKeyboard()
         self.name = "?"
@@ -92,6 +101,11 @@ class LogitechMouse:
         self._spy_mask = 0
         self._held = {}                     # button name -> codes pressed via uinput
         self._repeat = {}                   # button name -> scroll repeat task
+        self._pressed = {}                  # button name -> action it was pressed with
+        self._shift = set()                 # shift buttons held down
+        self._wheel = None                  # (mode without divert, counts per notch), if supported
+        self._wheel_diverted = False
+        self._wheel_acc = 0
         self._wake_fd = None                # evdev fd watched while the mouse is asleep
         self.kernel_keys = True             # can the evdev node emit keyboard keys?
         self._init_lock = asyncio.Lock()
@@ -156,6 +170,7 @@ class LogitechMouse:
                     d.close()
             await self.dev.call(ONBOARD, 1, bytes([MODE_HOST]))
             await self.dev.call(SPY, 1)
+            await self._read_wheel()
             self.connected = True
             self._unwatch_wake()
             await self._read_rates()
@@ -201,6 +216,9 @@ class LogitechMouse:
         for task in self._repeat.values():
             task.cancel()
         self._repeat.clear()
+        self._pressed.clear()
+        self._shift.clear()
+        await self._divert_wheel(False, force=True)
         if self.keymap:
             try:
                 self.restore_keymap()
@@ -249,6 +267,7 @@ class LogitechMouse:
 
     async def _apply(self, profile, keep_dpi):
         self._profile = profile
+        self._shift.clear()                 # a profile switch mid-hold must not leave a layer on
         if not keep_dpi:
             self._dpi_index = profile.get("dpi_index", 0)
             self._sniper = False
@@ -256,17 +275,25 @@ class LogitechMouse:
         if not self.connected or not self.keymap:
             return
         for i, b in enumerate(self.buttons):
-            act = self._action(b)
-            sc = 0x90001 + i
-            if act["type"] == "default":
-                code = E.BTN_LEFT + i
-            elif act["type"] == "key" and self._kernel_can(act["key"]):
-                code = keymap.keycode(act["key"])
-            else:                           # none, or handled by us from spy
-                code = E.KEY_RESERVED
-            self.keymap.set(sc, code)
+            self.keymap.set(0x90001 + i, self._kernel_code(i))
+        await self._divert_wheel(False)
         await self._set_rate(profile.get("report_rate"))
         await self._set_dpi()
+
+    def _kernel_code(self, i):
+        """Keycode button i gets in the normal layer: its key, or reserved if we handle it."""
+        act = self._action(self.buttons[i])
+        if act["type"] == "default":
+            return E.BTN_LEFT + i
+        if act["type"] == "key" and self._kernel_can(act["key"]) and not self._pinned_volume([act["key"]]):
+            return keymap.keycode(act["key"])
+        return E.KEY_RESERVED               # none, or handled by us from spy
+
+    def _pinned_volume(self, keys):
+        """The volume keycode if these keys are one volume key that ratd handles itself."""
+        if len(keys) == 1 and self.volume and self.volume.handles(keymap.keycode(keys[0])):
+            return keymap.keycode(keys[0])
+        return None
 
     def _current_dpi(self):
         p = self._profile
@@ -308,6 +335,8 @@ class LogitechMouse:
         elif fid == BATTERY:
             self._battery_from(r[4:])
             self.on_change(self)
+        elif fid == HIRES_WHEEL and r[3] >> 4 == 0 and self._wheel_diverted:
+            self._wheel_moved(r[4:])
 
     async def _woke(self):
         await asyncio.sleep(0.3)            # let the mouse finish waking up
@@ -330,10 +359,26 @@ class LogitechMouse:
             return DEFAULTS[name]
         return act
 
+    def _layer(self):
+        """The shift layer's bindings, if a shift button is held."""
+        if not self._shift:
+            return {}
+        return {b: a for b, a in (self._profile or {}).get("shift", {}).items() if a["type"] != "default"}
+
     def _button(self, name, down):
-        act = self._action(name)
+        # A release goes to whatever the press did, even if shift changed in between.
+        if down:
+            shifted = name in self._layer()
+            act = self._layer()[name] if shifted else self._action(name)
+            self._pressed[name] = (act, shifted)
+        else:
+            act, shifted = self._pressed.pop(name, (self._action(name), False))
         t = act["type"]
-        if t == "key" and not self._kernel_can(act["key"]):
+        if t == "shift":
+            self._set_shift(name, down)
+            return
+        # Shifted buttons are disabled in the keymap, so even plain keys go through uinput.
+        if t == "key" and (shifted or not self._kernel_can(act["key"])):
             t, act = "keys", {"type": "keys", "keys": [act["key"]]}
         if t in KERNEL_TYPES or t == "default":
             return
@@ -345,7 +390,10 @@ class LogitechMouse:
                 step = -1 if act["direction"] == "left" else 1
                 self._repeat[name] = asyncio.get_running_loop().create_task(self._scroll(step))
             return
-        if t == "keys":
+        if t == "keys" and self._pinned_volume(act["keys"]):
+            if down:
+                asyncio.get_running_loop().create_task(self.volume.key(self._pinned_volume(act["keys"])))
+        elif t == "keys":
             if down:
                 codes = [keymap.keycode(k) for k in act["keys"]]
                 self._held[name] = codes
@@ -368,6 +416,65 @@ class LogitechMouse:
             loop.create_task(self._set_dpi_logged())
         elif t == "command" and down:
             asyncio.get_running_loop().create_task(_run(act["command"]))
+        elif t == "media" and down:
+            asyncio.get_running_loop().create_task(self.on_media(act["action"]))
+
+    def _set_shift(self, name, down):
+        was = bool(self._shift)
+        (self._shift.add if down else self._shift.discard)(name)
+        if bool(self._shift) == was:
+            return
+        layer = (self._profile or {}).get("shift", {})
+        for i, b in enumerate(self.buttons):
+            if b in layer and layer[b]["type"] != "default" and self.keymap:
+                self.keymap.set(0x90001 + i, E.KEY_RESERVED if self._shift else self._kernel_code(i))
+        if any(w in layer and layer[w]["type"] != "default" for w in WHEEL) or not self._shift:
+            asyncio.get_running_loop().create_task(self._divert_wheel(bool(self._shift)))
+
+    async def _read_wheel(self):
+        try:
+            per_notch = (await self.dev.call(HIRES_WHEEL, 0))[0]
+            mode = (await self.dev.call(HIRES_WHEEL, 1))[0] & ~WHEEL_DIVERT
+        except (HidppError, TimeoutError) as e:
+            log.debug("%s: no hi-res wheel control: %s", self.name, e)
+            self._wheel = None
+            return
+        self._wheel = (mode, per_notch or 1)
+        self._wheel_diverted = True         # unknown after a takeover: make sure it's off
+        await self._divert_wheel(False)
+
+    async def _divert_wheel(self, on, force=False):
+        if not self._wheel or (on == self._wheel_diverted and not force):
+            return
+        mode = self._wheel[0] | (WHEEL_DIVERT if on else 0)
+        try:
+            await self.dev.call(HIRES_WHEEL, 2, bytes([mode]), timeout=0.5)
+        except (HidppError, TimeoutError, ConnectionError, OSError) as e:
+            log.warning("%s: wheel %s failed: %s", self.name, "divert" if on else "restore",
+                        str(e) or type(e).__name__)
+            return
+        self._wheel_diverted, self._wheel_acc = on, 0
+
+    def _wheel_moved(self, data):
+        # data[0] bit 4 = hi-res counts, bits 0-3 = periods; data[1:3] = signed delta, + is up
+        delta = struct.unpack_from(">h", data, 1)[0]
+        notch = self._wheel[1] if data[0] & 0x10 else 1
+        self._wheel_acc += delta
+        layer = self._layer()
+        while abs(self._wheel_acc) >= notch:
+            up = self._wheel_acc > 0
+            self._wheel_acc -= notch if up else -notch
+            act = layer.get("wheel_up" if up else "wheel_down")
+            if act:
+                self._tap("wheel_up" if up else "wheel_down", act)
+
+    def _tap(self, name, act):
+        """One wheel notch: press and release the action."""
+        if act["type"] == "scroll":
+            self.vkbd.hscroll(-1 if act["direction"] == "left" else 1)
+        elif act["type"] not in ("none", "shift"):
+            self._button(name, True)
+            self._button(name, False)
 
     async def _scroll(self, step):
         self.vkbd.hscroll(step)

@@ -3,6 +3,7 @@ so every change is validated and applied by the daemon."""
 import copy
 import json
 import os
+import subprocess
 import sys
 
 from evdev import ecodes as E
@@ -31,7 +32,17 @@ KEY_NAMES = {
     "KEY_PAGEUP": "Page Up", "KEY_PAGEDOWN": "Page Down", "KEY_CAPSLOCK": "Caps Lock",
     "BTN_LEFT": "Left click", "BTN_RIGHT": "Right click", "BTN_MIDDLE": "Middle click",
     "BTN_SIDE": "Mouse back", "BTN_EXTRA": "Mouse forward",
+    "KEY_PLAYPAUSE": "Play/Pause", "KEY_NEXTSONG": "Next track", "KEY_PREVIOUSSONG": "Previous track",
+    "KEY_STOPCD": "Stop", "KEY_VOLUMEUP": "Volume up", "KEY_VOLUMEDOWN": "Volume down",
+    "KEY_MUTE": "Mute",
 }
+# Player actions go to an MPRIS player chosen by ratd; volume is system-wide, so plain keys.
+MEDIA_ACTIONS = {"playpause": "Play/Pause", "next": "Next track", "previous": "Previous track",
+                 "stop": "Stop"}
+MEDIA_KEYS = ["KEY_VOLUMEUP", "KEY_VOLUMEDOWN", "KEY_MUTE"]
+# Old configs bound these as keys; the dialog reopens them as the MPRIS action.
+KEY_TO_MEDIA = {"KEY_PLAYPAUSE": "playpause", "KEY_NEXTSONG": "next",
+                "KEY_PREVIOUSSONG": "previous", "KEY_STOPCD": "stop"}
 MOUSE_BUTTONS = ["BTN_LEFT", "BTN_RIGHT", "BTN_MIDDLE", "BTN_SIDE", "BTN_EXTRA"]
 MODIFIERS = {"KEY_LEFTCTRL", "KEY_RIGHTCTRL", "KEY_LEFTSHIFT", "KEY_RIGHTSHIFT",
              "KEY_LEFTALT", "KEY_RIGHTALT", "KEY_LEFTMETA", "KEY_RIGHTMETA"}
@@ -63,7 +74,39 @@ def describe(act, default=None):
         return f"Scroll {act.get('direction')}"
     if t == "command":
         return "Run: " + act.get("command", "")
+    if t == "media":
+        return MEDIA_ACTIONS.get(act.get("action"), "Media")
+    if t == "shift":
+        return "Hold for second layer"
+    if t == "wheel":                    # GUI-only: what a wheel notch does when not bound
+        return f"Scroll {act.get('direction')}"
     return t
+
+
+def output_devices():
+    """[(sink name, description)] from PipeWire/PulseAudio; empty if pactl isn't there."""
+    try:
+        out = subprocess.run(["pactl", "-f", "json", "list", "sinks"], capture_output=True,
+                             text=True, timeout=3).stdout
+        return [(x["name"], x.get("description") or x["name"]) for x in json.loads(out)]
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+
+
+def volume_keyboards():
+    """Names of connected input devices whose volume keys ratd could take over."""
+    import evdev
+    from .volume import candidate
+    names = set()
+    for path in evdev.list_devices():
+        try:
+            d = evdev.InputDevice(path)
+        except OSError:
+            continue
+        if candidate(d):
+            names.add(d.name)
+        d.close()
+    return sorted(names)
 
 
 # ---- service connection ----------------------------------------------------------
@@ -161,9 +204,10 @@ class G502XDrawing:
             "tilt_left": (370, 139), "tilt_right": (430, 139), "top": (400, 224),
             "dpi_up": (316, 129), "dpi_down": (314, 169), "sniper": (271, 235),
             "forward": (265, 279), "back": (263, 311),
+            "wheel_up": (406, 104), "wheel_down": (406, 172),
         }
         self.sides = {"left": ["dpi_up", "tilt_left", "dpi_down", "left", "sniper", "forward", "back"],
-                      "right": ["middle", "tilt_right", "right", "top"]}
+                      "right": ["wheel_up", "middle", "wheel_down", "tilt_right", "right", "top"]}
 
 
 DRAWINGS = {"G502 X": G502XDrawing}
@@ -179,6 +223,7 @@ class MouseDiagram(QWidget):
         self.setMouseTracking(True)
         self.setMinimumSize(520, 380)
         self.buttons, self.actions, self.defaults = {}, {}, {}
+        self.default_prefix = "Default"
         self.hover = None
         self.boxes = self._layout_boxes()
         bounds = self.d.body.boundingRect()
@@ -186,18 +231,21 @@ class MouseDiagram(QWidget):
             bounds = bounds.united(r)
         self.bounds = bounds.adjusted(-8, -8, 8, 8)      # fit what's drawn, not the whole model space
 
-    def _layout_boxes(self):
+    def _layout_boxes(self, only=None):
         w, h = self.d.SIZE
         boxes = {}
         for side, names in self.d.sides.items():
-            gap = (h - 40) / len(names)
+            names = [n for n in names if only is None or n in only]
+            gap = (h - 40) / max(len(names), 1)
             for i, n in enumerate(names):
                 x = 232 - BOX_W if side == "left" else 560      # just clear of the body
                 boxes[n] = QRectF(x, 20 + gap * i + (gap - BOX_H) / 2, BOX_W, BOX_H)
         return boxes
 
-    def set_profile(self, buttons, actions, defaults):
+    def set_profile(self, buttons, actions, defaults, default_prefix="Default"):
         self.buttons, self.actions, self.defaults = buttons, actions, defaults
+        self.default_prefix = default_prefix
+        self.boxes = self._layout_boxes(buttons)
         self.update()
 
     def _transform(self):
@@ -299,7 +347,7 @@ class MouseDiagram(QWidget):
             p.setFont(bold)
             text = describe(act, self.defaults.get(n))
             if act.get("type") == "default":
-                text = "Default · " + text
+                text = f"{self.default_prefix} · " + text
             fm = p.fontMetrics()
             p.drawText(r.adjusted(14, r.height() / 2 - 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(text, Qt.ElideRight, int(r.width() - 22)))
@@ -315,7 +363,7 @@ class ButtonGrid(QWidget):
         self.grid = QGridLayout(self)
         self.grid.setAlignment(Qt.AlignTop)
 
-    def set_profile(self, buttons, actions, defaults):
+    def set_profile(self, buttons, actions, defaults, default_prefix="Default"):
         while self.grid.count():
             self.grid.takeAt(0).widget().deleteLater()
         for i, (bid, label) in enumerate(buttons.items()):
@@ -327,6 +375,20 @@ class ButtonGrid(QWidget):
 
 
 # ---- editing one binding --------------------------------------------------------------
+
+def block_global_shortcuts(on):
+    """Pause Plasma's global shortcuts (as KDE's own shortcut editor does), so a key like
+    F12 reaches the capture box instead of starting Spectacle."""
+    global _shortcuts_blocked
+    if on == _shortcuts_blocked:
+        return
+    _shortcuts_blocked = on
+    QDBusInterface("org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel",
+                   QDBusConnection.sessionBus()).call("blockGlobalShortcuts", on)
+
+
+_shortcuts_blocked = False
+
 
 class KeyCapture(QLineEdit):
     """Press a key or a combo; stores evdev names (KEY_LEFTCTRL, KEY_Z)."""
@@ -375,17 +437,26 @@ class KeyCapture(QLineEdit):
 
     def focusInEvent(self, e):
         self._held = []
+        block_global_shortcuts(True)
         super().focusInEvent(e)
+
+    def focusOutEvent(self, e):
+        block_global_shortcuts(False)
+        super().focusOutEvent(e)
+
+    def hideEvent(self, e):                       # dialog closed while the box had focus
+        block_global_shortcuts(False)
+        super().hideEvent(e)
 
 
 class BindingDialog(QDialog):
     TYPES = [("default", "Default"), ("key", "Keyboard key or combo"), ("mouse", "Mouse button"),
-             ("dpi", "DPI"), ("scroll", "Horizontal scroll"), ("command", "Run a command"),
-             ("none", "Disabled")]
+             ("media", "Media control"), ("dpi", "DPI"), ("scroll", "Horizontal scroll"), ("command", "Run a command"),
+             ("shift", "Hold for second layer"), ("none", "Disabled")]
 
-    def __init__(self, parent, label, act, default):
+    def __init__(self, parent, label, act, default, media_ignore=(), layer=False):
         super().__init__(parent)
-        self.setWindowTitle(f"{label} button")
+        self.setWindowTitle(f"{label} — second layer" if layer else f"{label} button")
         self.default = default
         lay = QVBoxLayout(self)
         form = QFormLayout()
@@ -393,6 +464,10 @@ class BindingDialog(QDialog):
 
         self.kind = QComboBox()
         for t, text in self.TYPES:
+            if layer and t == "shift":
+                continue
+            if t == "default" and layer:
+                text = "Same as normal"
             self.kind.addItem(text + (f" ({describe(default)})" if t == "default" and default else ""), t)
         form.addRow("Action", self.kind)
 
@@ -404,6 +479,23 @@ class BindingDialog(QDialog):
         self.mouse = QComboBox()
         for b in MOUSE_BUTTONS:
             self.mouse.addItem(key_label(b), b)
+        self.media = QComboBox()
+        for k, v in MEDIA_ACTIONS.items():
+            self.media.addItem(v, f"media:{k}")
+        for k in MEDIA_KEYS:
+            self.media.addItem(key_label(k), f"key:{k}")
+        self.ignore = QLineEdit(", ".join(media_ignore))
+        self.ignore.setPlaceholderText("e.g. firefox, chromium")
+        self.ignore.setToolTip("Players whose name contains one of these are never controlled.\n"
+                               "firefox also covers LibreWolf; chromium covers Helium, Chrome, Brave.\n"
+                               "Applies to every media button, not just this one.")
+        media_page = QWidget()
+        mf = QFormLayout(media_page)
+        mf.setContentsMargins(0, 0, 0, 0)
+        mf.addRow(self.media)
+        mf.addRow("Ignore apps", self.ignore)
+        self.media.currentIndexChanged.connect(
+            lambda: self.ignore.setEnabled(self.media.currentData().startswith("media:")))
         self.dpi = QComboBox()
         for k, v in DPI_ACTIONS.items():
             self.dpi.addItem(v, k)
@@ -413,8 +505,12 @@ class BindingDialog(QDialog):
         self.command = QLineEdit()
         self.command.setPlaceholderText("e.g. spectacle -r")
         blank = QLabel("")
-        for t, w in (("default", QLabel("Does what this button normally does.")),
-                     ("key", self.capture), ("mouse", self.mouse), ("dpi", self.dpi),
+        shift_help = QLabel("While held, buttons use their second-layer bindings\n"
+                            "(Buttons tab → While holding …).")
+        for t, w in (("default", QLabel("Uses the normal binding while the hold button is held." if layer
+                                        else "Does what this button normally does.")),
+                     ("shift", shift_help),
+                     ("key", self.capture), ("mouse", self.mouse), ("media", media_page), ("dpi", self.dpi),
                      ("scroll", self.scroll), ("command", self.command), ("none", blank)):
             self.page[t] = self.pages.addWidget(w)
         self.kind.currentIndexChanged.connect(self._kind_changed)
@@ -423,6 +519,11 @@ class BindingDialog(QDialog):
         if t == "key" and act["key"].startswith("BTN_"):
             self._select("mouse")
             self.mouse.setCurrentIndex(max(0, self.mouse.findData(act["key"])))
+        elif t == "media" or (t == "key" and act["key"] in MEDIA_KEYS + list(KEY_TO_MEDIA)):
+            data = f"media:{act['action']}" if t == "media" else (
+                f"media:{KEY_TO_MEDIA[act['key']]}" if act["key"] in KEY_TO_MEDIA else f"key:{act['key']}")
+            self._select("media")
+            self.media.setCurrentIndex(max(0, self.media.findData(data)))
         elif t in ("key", "keys"):
             self._select("key")
             self.capture.set_keys([act["key"]] if t == "key" else act["keys"])
@@ -466,6 +567,9 @@ class BindingDialog(QDialog):
             return {"type": "key", "key": keys[0]} if len(keys) == 1 else {"type": "keys", "keys": keys}
         if t == "mouse":
             return {"type": "key", "key": self.mouse.currentData()}
+        if t == "media":
+            kind, v = self.media.currentData().split(":", 1)
+            return {"type": "media", "action": v} if kind == "media" else {"type": "key", "key": v}
         if t == "dpi":
             return {"type": "dpi", "action": self.dpi.currentData()}
         if t == "scroll":
@@ -473,6 +577,9 @@ class BindingDialog(QDialog):
         if t == "command":
             return {"type": "command", "command": self.command.text().strip()}
         return {"type": t}
+
+    def media_ignore(self):
+        return [s.strip() for s in self.ignore.text().split(",") if s.strip()]
 
 
 # ---- DPI and rules tabs ------------------------------------------------------------------
@@ -741,7 +848,32 @@ class Window(QMainWindow):
         self.grid.clicked.connect(self._edit_button)
         self.buttons_page.addWidget(self.grid)
         self.diagram = None
-        self.tabs.addTab(self.buttons_page, QIcon.fromTheme("input-mouse"), "Buttons")
+        self.layer = False                      # showing the second (hold) layer?
+        buttons_tab = QWidget()
+        bl = QVBoxLayout(buttons_tab)
+        lr = QHBoxLayout()
+        lr.addWidget(QLabel("Hold button"))
+        self.hold = QComboBox()
+        self.hold.setToolTip("While this button is held, the other buttons and the wheel switch\n"
+                             "to a second set of bindings.")
+        self.hold.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.hold.currentIndexChanged.connect(self._hold_changed)
+        lr.addWidget(self.hold)
+        lr.addSpacing(12)
+        self.layer_group = QButtonGroup(self)
+        for i, text in enumerate(("Normal", "While holding")):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setChecked(i == 0)
+            self.layer_group.addButton(b, i)
+            lr.addWidget(b)
+        self.layer_group.idClicked.connect(self._layer_changed)
+        self.layer_hint = QLabel("")
+        self.layer_hint.setWordWrap(True)
+        lr.addWidget(self.layer_hint, 1)
+        bl.addLayout(lr)
+        bl.addWidget(self.buttons_page, 1)
+        self.tabs.addTab(buttons_tab, QIcon.fromTheme("input-mouse"), "Buttons")
         self.dpi = DpiEditor()
         self.dpi.changed.connect(self._dirty)
         self.tabs.addTab(self.dpi, QIcon.fromTheme("speedometer"), "DPI && polling")
@@ -754,6 +886,19 @@ class Window(QMainWindow):
         self.notify_battery.setToolTip("Desktop notification when the battery drops to 15% and 5%")
         self.notify_battery.toggled.connect(self._notify_toggled)
         bottom.addWidget(self.notify_battery)
+        bottom.addSpacing(12)
+        bottom.addWidget(QLabel("Volume keys control"))
+        self.volume_device = QComboBox()
+        self.volume_device.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.volume_device.setToolTip("Which output the volume keys change: the mouse's volume bindings\n"
+                                      "and keyboard volume keys/knobs. Default output = Plasma's behaviour,\n"
+                                      "which follows whatever device was used last.")
+        self.volume_device.currentIndexChanged.connect(self._volume_device_changed)
+        bottom.addWidget(self.volume_device)
+        self.volume_kb = QPushButton("Keyboards…")
+        self.volume_kb.setToolTip("Which keyboards' volume keys or knobs also change this device")
+        self.volume_kb.clicked.connect(self._pick_volume_keyboards)
+        bottom.addWidget(self.volume_kb)
         bottom.addSpacing(12)
         self.hint = QLabel("")
         self.hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)    # long paths mustn't widen the window
@@ -788,6 +933,7 @@ class Window(QMainWindow):
         self.notify_battery.blockSignals(True)
         self.notify_battery.setChecked(self.cfg.get("notify_low_battery", True))
         self.notify_battery.blockSignals(False)
+        self._fill_volume_devices()
         keep = self.dkey
         self.device.blockSignals(True)
         self.device.clear()
@@ -875,14 +1021,72 @@ class Window(QMainWindow):
         if not sec or not name:
             return
         prof = sec["profiles"][name]
-        labels, defaults, _locked = self._button_info()
-        target = self.diagram or self.grid
-        target.set_profile(labels, prof.setdefault("buttons", {}), defaults)
+        prof.setdefault("buttons", {})
+        self._show_buttons()
         live = self._live()
         limits = (live["dpi_min"], live["dpi_max"]) if live and live.get("dpi_min") else (100, 44000)
         self.dpi.set_profile(prof, limits, live.get("report_rates", []) if live else [])
         self.rules.set_data(self.cfg, list(sec["profiles"]), self.state.get("recent", []))
         self.make_default.setEnabled(name != sec["default_profile"])
+
+    def _layer_changed(self, i):
+        self.layer = i == 1
+        self._show_buttons()
+
+    def _layer_view(self, prof):
+        """labels, actions, defaults for the shift layer: wheel notches added, and each
+        button's 'default' is what it does normally."""
+        labels, defaults, _locked = self._button_info()
+        labels = dict(labels, wheel_up="Wheel up", wheel_down="Wheel down")
+        normal = {b: (prof["buttons"].get(b) if prof["buttons"].get(b, {"type": "default"})["type"] != "default"
+                      else defaults.get(b)) for b in labels}
+        normal["wheel_up"] = {"type": "wheel", "direction": "up"}
+        normal["wheel_down"] = {"type": "wheel", "direction": "down"}
+        return labels, prof.get("shift", {}), normal
+
+    def _show_buttons(self):
+        sec, name = self._section(), self._pname()
+        if not sec or not name:
+            return
+        prof = sec["profiles"][name]
+        target = self.diagram or self.grid
+        labels, defaults, locked = self._button_info()
+        held = [b for b, a in prof["buttons"].items() if a["type"] == "shift"]
+        self.hold.blockSignals(True)
+        self.hold.clear()
+        self.hold.addItem("None", None)
+        for b, label in labels.items():
+            if b not in locked:
+                self.hold.addItem(label, b)
+        self.hold.setCurrentIndex(max(0, self.hold.findData(held[0])) if held else 0)
+        self.hold.blockSignals(False)
+        second = self.layer_group.button(1)
+        second.setText(f"While holding {labels.get(held[0], held[0])}" if held else "While holding …")
+        second.setEnabled(bool(held))
+        if self.layer and not held:
+            self.layer = False
+            self.layer_group.button(0).setChecked(True)
+        if self.layer:
+            target.set_profile(*self._layer_view(prof), default_prefix="Normal")
+            self.layer_hint.setText("Buttons left on Normal keep their usual binding.")
+        else:
+            target.set_profile(labels, prof["buttons"], defaults)
+            self.layer_hint.setText("" if held else "Pick a hold button to give the others a second set of bindings.")
+
+    def _hold_changed(self):
+        sec, name = self._section(), self._pname()
+        if not sec or not name:
+            return
+        buttons = sec["profiles"][name]["buttons"]
+        for b, a in list(buttons.items()):
+            if a["type"] == "shift":
+                buttons[b] = {"type": "default"}
+        new = self.hold.currentData()
+        if new:
+            buttons[new] = {"type": "shift"}
+            sec["profiles"][name].get("shift", {}).pop(new, None)   # it can't also act in its own layer
+        self._show_buttons()
+        self._dirty()
 
     # -- live state --
     def _state(self, st):
@@ -911,11 +1115,31 @@ class Window(QMainWindow):
                                     "to fix a bad setup.")
             return
         prof = sec["profiles"][name]
-        dlg = BindingDialog(self, labels.get(bid, bid), prof["buttons"].get(bid, {"type": "default"}),
-                            defaults.get(bid))
+        if self.layer:
+            if prof["buttons"].get(bid, {}).get("type") == "shift":
+                QMessageBox.information(self, labels.get(bid, bid),
+                                        "This is the hold button. Change it with the Hold button "
+                                        "menu above.")
+                return
+            labels, layer, normal = self._layer_view(prof)
+            dlg = BindingDialog(self, labels.get(bid, bid), layer.get(bid, {"type": "default"}),
+                                normal.get(bid), self.cfg.get("media_ignore", []), layer=True)
+        else:
+            dlg = BindingDialog(self, labels.get(bid, bid), prof["buttons"].get(bid, {"type": "default"}),
+                                defaults.get(bid), self.cfg.get("media_ignore", []))
         if dlg.exec():
-            prof["buttons"][bid] = dlg.action()
-            (self.diagram or self.grid).set_profile(labels, prof["buttons"], defaults)
+            act = dlg.action()
+            if not self.layer:
+                prof["buttons"][bid] = act
+            elif act["type"] == "default":
+                prof.get("shift", {}).pop(bid, None)
+                if not prof.get("shift"):
+                    prof.pop("shift", None)
+            else:
+                prof.setdefault("shift", {})[bid] = act
+            if act["type"] == "media":
+                self.cfg["media_ignore"] = dlg.media_ignore()
+            self._show_buttons()
             self._dirty()
 
     def _new(self):
@@ -990,6 +1214,56 @@ class Window(QMainWindow):
             QMessageBox.information(self, "Unsaved changes", "Apply your changes first.")
             return
         self._try(lambda: self.svc.set_profile(cur))
+
+    def _fill_volume_devices(self):
+        cur = self.cfg.get("volume_device")
+        self.volume_device.blockSignals(True)
+        self.volume_device.clear()
+        self.volume_device.addItem("Default output", None)
+        for name, desc in output_devices():
+            self.volume_device.addItem(desc, name)
+        if cur and self.volume_device.findData(cur) < 0:
+            self.volume_device.addItem(f"{cur} (not connected)", cur)
+        self.volume_device.setCurrentIndex(max(0, self.volume_device.findData(cur)) if cur else 0)
+        self.volume_device.blockSignals(False)
+        self.volume_kb.setEnabled(bool(cur))
+
+    def _volume_device_changed(self):
+        dev = self.volume_device.currentData()
+        if dev:
+            self.cfg["volume_device"] = dev
+        else:
+            self.cfg.pop("volume_device", None)
+        self.volume_kb.setEnabled(bool(dev))
+        self._dirty()
+
+    def _pick_volume_keyboards(self):
+        chosen = set(self.cfg.get("volume_keyboards", []))
+        names = sorted(set(volume_keyboards()) | chosen)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Keyboard volume keys")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Volume keys and knobs on the ticked devices change\n"
+                             f"<b>{self.volume_device.currentText()}</b>. Others keep Plasma's behaviour."))
+        boxes = []
+        for n in names:
+            b = QCheckBox(n if n in volume_keyboards() else f"{n} (not connected)")
+            b.setChecked(n in chosen)
+            boxes.append((n, b))
+            lay.addWidget(b)
+        if not names:
+            lay.addWidget(QLabel("No keyboard with volume keys found."))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec():
+            picked = [n for n, b in boxes if b.isChecked()]
+            if picked:
+                self.cfg["volume_keyboards"] = picked
+            else:
+                self.cfg.pop("volume_keyboards", None)
+            self._dirty()
 
     def _notify_toggled(self, on):
         self.cfg["notify_low_battery"] = on
@@ -1106,6 +1380,7 @@ def run():
     app = QApplication(sys.argv)
     app.setApplicationName("ratd-gui")
     app.setDesktopFileName("ratd")
+    app.aboutToQuit.connect(lambda: block_global_shortcuts(False))
     svc = Service()
     w = Window(svc)
     w.show()

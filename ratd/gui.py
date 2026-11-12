@@ -31,6 +31,7 @@ KEY_NAMES = {
     "KEY_RIGHTSHIFT": "Right Shift", "KEY_LEFTALT": "Alt", "KEY_RIGHTALT": "AltGr",
     "KEY_LEFTMETA": "Meta", "KEY_RIGHTMETA": "Right Meta", "KEY_ESC": "Esc",
     "KEY_PAGEUP": "Page Up", "KEY_PAGEDOWN": "Page Down", "KEY_CAPSLOCK": "Caps Lock",
+    "KEY_UP": "Up", "KEY_END": "End", "KEY_TAB": "Tab",
     "BTN_LEFT": "Left click", "BTN_RIGHT": "Right click", "BTN_MIDDLE": "Middle click",
     "BTN_SIDE": "Mouse back", "BTN_EXTRA": "Mouse forward",
     "KEY_PLAYPAUSE": "Play/Pause", "KEY_NEXTSONG": "Next track", "KEY_PREVIOUSSONG": "Previous track",
@@ -401,7 +402,7 @@ class KeyCapture(QLineEdit):
     def __init__(self):
         super().__init__()
         self.setReadOnly(True)
-        self.setPlaceholderText("Click here, then press a key or combo")
+        self.setPlaceholderText("Click here and press a key or combo, or use Choose…")
         self.keys = []
         self._held = []
 
@@ -451,6 +452,67 @@ class KeyCapture(QLineEdit):
     def hideEvent(self, e):                       # dialog closed while the box had focus
         block_global_shortcuts(False)
         super().hideEvent(e)
+
+
+def _key_groups():
+    """Keys offered by the Choose menu, for keys the keyboard in front of you doesn't have."""
+    L = lambda names: [f"KEY_{n}" for n in names]
+    return [
+        ("Letters", L("ABCDEFGHIJKLMNOPQRSTUVWXYZ")),
+        ("Numbers", L("1234567890")),
+        ("F1–F12", L(f"F{i}" for i in range(1, 13))),
+        ("F13–F24", L(f"F{i}" for i in range(13, 25))),
+        ("Keypad", L(["KP0", "KP1", "KP2", "KP3", "KP4", "KP5", "KP6", "KP7", "KP8", "KP9",
+                      "KPDOT", "KPPLUS", "KPMINUS", "KPASTERISK", "KPSLASH", "KPENTER", "NUMLOCK"])),
+        ("Navigation", L(["UP", "DOWN", "LEFT", "RIGHT", "HOME", "END", "PAGEUP", "PAGEDOWN",
+                          "INSERT", "DELETE"])),
+        ("Editing", L(["ENTER", "SPACE", "TAB", "BACKSPACE", "ESC", "CAPSLOCK"])),
+        ("Symbols", L(["MINUS", "EQUAL", "LEFTBRACE", "RIGHTBRACE", "BACKSLASH", "SEMICOLON",
+                       "APOSTROPHE", "GRAVE", "COMMA", "DOT", "SLASH", "102ND"])),
+        ("System", L(["SYSRQ", "SCROLLLOCK", "PAUSE", "COMPOSE", "MENU"])),
+        ("Modifiers", L(["LEFTCTRL", "LEFTSHIFT", "LEFTALT", "LEFTMETA",
+                         "RIGHTCTRL", "RIGHTSHIFT", "RIGHTALT", "RIGHTMETA"])),
+    ]
+
+
+SYMBOL_LABELS = {"KEY_MINUS": "- (minus)", "KEY_EQUAL": "= (equals)", "KEY_LEFTBRACE": "[",
+                 "KEY_RIGHTBRACE": "]", "KEY_BACKSLASH": "\\", "KEY_SEMICOLON": ";",
+                 "KEY_APOSTROPHE": "' (apostrophe)", "KEY_GRAVE": "` (grave)", "KEY_COMMA": ",",
+                 "KEY_DOT": ". (period)", "KEY_SLASH": "/", "KEY_102ND": "\\ (ISO extra key)",
+                 "KEY_SYSRQ": "Print Screen", "KEY_COMPOSE": "Menu (compose)",
+                 "KEY_KPDOT": "Keypad .", "KEY_KPASTERISK": "Keypad *", "KEY_KPSLASH": "Keypad /",
+                 "KEY_NUMLOCK": "Num Lock", "KEY_SCROLLLOCK": "Scroll Lock"}
+
+
+def key_picker(capture):
+    """A Choose… button for a KeyCapture. Picking a modifier toggles it; picking any other key
+    sets the main key and keeps the modifiers, so Ctrl (pressed or picked) + Keypad 5 works."""
+    btn = QToolButton()
+    btn.setText("Choose…")
+    btn.setToolTip("Pick a key from a list — for keys your keyboard doesn't have.\n"
+                   "Modifiers toggle on and off, so you can build combos.")
+    btn.setPopupMode(QToolButton.InstantPopup)
+    menu = QMenu(btn)
+    for title, names in _key_groups():
+        sub = menu.addMenu(title)
+        for name in names:
+            if name not in E.ecodes:
+                continue
+            a = sub.addAction(SYMBOL_LABELS.get(name) or key_label(name))
+            a.triggered.connect(lambda _=False, n=name: _pick(capture, n))
+    btn.setMenu(menu)
+    return btn
+
+
+def _pick(capture, name):
+    mods = [k for k in capture.keys if k in MODIFIERS]
+    rest = [k for k in capture.keys if k not in MODIFIERS]
+    if name in MODIFIERS:
+        mods = [k for k in mods if k != name] if name in mods else mods + [name]
+    else:
+        rest = [name]
+    capture.set_keys(mods + rest)
+    capture.changed.emit()
 
 
 class BindingDialog(QDialog):
@@ -506,6 +568,14 @@ class BindingDialog(QDialog):
         self.scroll = QComboBox()
         self.scroll.addItem("Left", "left")
         self.scroll.addItem("Right", "right")
+        key_page = QWidget()
+        kr = QHBoxLayout(key_page)
+        kr.setContentsMargins(0, 0, 0, 0)
+        kr.addWidget(self.capture, 1)
+        kr.addWidget(key_picker(self.capture))
+        kclear = QPushButton(QIcon.fromTheme("edit-clear"), "Clear")
+        kclear.clicked.connect(lambda: self.capture.set_keys([]))
+        kr.addWidget(kclear)
         self.command = QLineEdit()
         self.command.setPlaceholderText("e.g. spectacle -r")
         blank = QLabel("")
@@ -521,6 +591,7 @@ class BindingDialog(QDialog):
         clear.clicked.connect(lambda: self.also.set_keys([]))
         row = QHBoxLayout()
         row.addWidget(self.also, 1)
+        row.addWidget(key_picker(self.also))
         row.addWidget(clear)
         sf.addRow("Also press", row)
         self.hold_ms = QSpinBox()
@@ -537,7 +608,7 @@ class BindingDialog(QDialog):
         for t, w in (("default", QLabel("Uses the normal binding while the hold button is held." if layer
                                         else "Does what this button normally does.")),
                      ("shift", shift_page),
-                     ("key", self.capture), ("mouse", self.mouse), ("media", media_page), ("dpi", self.dpi),
+                     ("key", key_page), ("mouse", self.mouse), ("media", media_page), ("dpi", self.dpi),
                      ("scroll", self.scroll), ("command", self.command), ("none", blank)):
             self.page[t] = self.pages.addWidget(w)
         self.kind.currentIndexChanged.connect(self._kind_changed)
@@ -584,7 +655,7 @@ class BindingDialog(QDialog):
 
     def _accept(self):
         if self.kind.currentData() == "key" and not self.capture.keys:
-            QMessageBox.warning(self, "No key", "Click the box and press the key or combo to bind.")
+            QMessageBox.warning(self, "No key", "Click the box and press the key or combo, or pick one with Choose….")
             return
         if self.kind.currentData() == "command" and not self.command.text().strip():
             QMessageBox.warning(self, "No command", "Type the command to run.")

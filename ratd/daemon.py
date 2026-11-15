@@ -33,6 +33,7 @@ class Daemon:
         self.focus = ("", "")        # (window class, caption)
         self.recent = []             # recently focused window classes, newest first
         self.override = None         # manually chosen profile, or None for automatic
+        self.active = None           # config key of the mouse last clicked or woken
         self.iface = None
         self.media = None
         self.volume = None
@@ -50,7 +51,7 @@ class Daemon:
     async def _probe(self, node):
         """Offer the node to each backend; the first that recognises it drives it."""
         path = f"/dev/{node}"
-        hooks = Hooks(self._changed, self.bring_up, self._media, self.volume)
+        hooks = Hooks(self._changed, self.bring_up, self._media, self.volume, self._used)
         for backend in BACKENDS:
             try:
                 found = backend.probe(node, hooks)
@@ -100,7 +101,7 @@ class Daemon:
 
     def wanted_profile(self, m):
         section = self.cfg["devices"][m.key]
-        name = self.override or config.match_rule(self.cfg, *self.focus)
+        name = self.override or config.match_rule(section, *self.focus)
         if name not in section["profiles"]:
             name = section["default_profile"]
         return name, section["profiles"][name]
@@ -131,6 +132,7 @@ class Daemon:
         return {"focus": {"class": self.focus[0], "caption": self.focus[1]},
                 "override": self.override,
                 "recent": self.recent,
+                "active": self.active,
                 "devices": self._visible_devices()}
 
     def _visible_devices(self):
@@ -143,6 +145,12 @@ class Daemon:
             if cur is None or (m.connected and not cur.connected):
                 best[m.key] = m
         return [m.state() for m in best.values()]
+
+    def _used(self, m):
+        """A button press or wake on this mouse. Only a change of mouse is news."""
+        if m.key != self.active:
+            self.active = m.key
+            self._emit()
 
     def _changed(self, m):
         if m.battery and m.battery[0] is not None:
@@ -242,6 +250,7 @@ class Manager(ServiceInterface):
         """Validate, save, and apply a whole config. Returns '' or an error message."""
         try:
             cfg = json.loads(cfg_json)
+            config.migrate(cfg)
             config.save(cfg)
         except (ValueError, config.ConfigError) as e:
             return str(e)

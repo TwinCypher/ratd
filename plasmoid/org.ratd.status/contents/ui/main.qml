@@ -21,8 +21,11 @@ PlasmoidItem {
 
     property var ratd: ({})
     property var profiles: []
+    // The mouse last clicked or woken; else any connected one.
     readonly property var device: (ratd.devices && ratd.devices.length)
-                                  ? (ratd.devices.find(d => d.connected) || ratd.devices[0]) : null
+                                  ? (ratd.devices.find(d => d.connected && d.key === ratd.active)
+                                     || ratd.devices.find(d => d.connected) || ratd.devices[0]) : null
+    readonly property var others: (ratd.devices || []).filter(d => !device || d.key !== device.key)
     readonly property bool lowBattery: device !== null && device.battery !== null
                                        && device.battery <= 15 && device.battery_status === "discharging"
 
@@ -54,6 +57,14 @@ PlasmoidItem {
         let t = (device.dpi ? String(device.dpi) : "?") + " DPI";
         if (device.battery !== null) t += " · " + device.battery + "%";
         return t;
+    }
+
+    function shortName(d) {
+        return d.name.replace(/ LIGHTSPEED$/, "");
+    }
+
+    function otherLine(d) {
+        return shortName(d) + ": " + (d.connected ? (d.profile || "?") + " · " + d.dpi + " DPI" : "asleep");
     }
 
     function profileReason() {
@@ -88,12 +99,13 @@ PlasmoidItem {
 
     Plasmoid.icon: "input-mouse"
     Plasmoid.status: serviceUp ? PlasmaCore.Types.ActiveStatus : PlasmaCore.Types.PassiveStatus
-    toolTipMainText: device ? device.name : "ratd"
+    toolTipMainText: device ? shortName(device) : "ratd"
     toolTipSubText: !serviceUp ? "Service not running"
                   : !device ? "No mouse found"
                   : !device.connected ? "Asleep"
                   : device.dpi + " DPI · profile " + device.profile + " (" + profileReason() + ")"
                     + (device.battery !== null ? "\nBattery " + device.battery + "%, " + device.battery_status : "")
+                    + others.map(d => "\n" + otherLine(d)).join("")
 
     compactRepresentation: MouseArea {
         readonly property int pad: Kirigami.Units.largeSpacing
@@ -116,7 +128,9 @@ PlasmoidItem {
             ColumnLayout {
                 spacing: 0
                 PlasmaComponents.Label {
-                    text: root.device && root.device.profile ? root.device.profile : "ratd"
+                    text: !root.device ? "ratd"
+                          : (root.others.length ? root.shortName(root.device) + " · " : "")
+                            + (root.device.profile || "?")
                     font.bold: true
                     font.italic: !!root.ratd.override
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
@@ -137,7 +151,7 @@ PlasmoidItem {
 
         Kirigami.Heading {
             level: 3
-            text: root.device ? root.device.name : (root.serviceUp ? "No mouse found" : "ratd isn't running")
+            text: root.device ? root.shortName(root.device) : (root.serviceUp ? "No mouse found" : "ratd isn't running")
         }
 
         GridLayout {
@@ -161,6 +175,15 @@ PlasmoidItem {
             }
             PlasmaComponents.Label { text: "Status"; opacity: 0.7 }
             PlasmaComponents.Label { text: root.device && root.device.connected ? "Connected" : "Asleep" }
+        }
+
+        Repeater {
+            model: root.others
+            PlasmaComponents.Label {
+                required property var modelData
+                text: root.otherLine(modelData)
+                opacity: 0.7
+            }
         }
 
         Kirigami.Separator { Layout.fillWidth: true; visible: root.profiles.length > 0 }

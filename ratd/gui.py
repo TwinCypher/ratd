@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal, Slot
 from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QPen, QTransform
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QSizePolicy, QSpinBox,
     QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout,
@@ -818,14 +818,17 @@ class RulesEditor(QWidget):
     def __init__(self):
         super().__init__()
         lay = QVBoxLayout(self)
-        intro = QLabel("When a window matching a rule is focused, its profile is used. "
-                       "The first matching rule wins; anything else uses the default profile.")
-        intro.setWordWrap(True)
-        lay.addWidget(intro)
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Window (class, * wildcards)", "Profile"])
+        self.intro = QLabel()
+        self.intro.setWordWrap(True)
+        lay.addWidget(self.intro)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Window (class, * wildcards)", "Also match title", "Profile"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeaderItem(1).setToolTip(
+            "Also match the window title. Needed for games run through Proton/umu,\n"
+            "whose window class is something like steam_app_default.")
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.itemChanged.connect(self._edited)
         lay.addWidget(self.table)
@@ -842,29 +845,38 @@ class RulesEditor(QWidget):
             row.addWidget(w)
         row.addStretch()
         lay.addLayout(row)
-        self.cfg, self.profiles, self.recent = None, [], []
+        self.sec, self.profiles, self.recent = None, [], []
 
-    def set_data(self, cfg, profiles, recent):
-        self.cfg, self.profiles, self.recent = cfg, profiles, recent
+    def set_data(self, sec, mouse, recent):
+        """Edit one mouse's rules (sec = its config section)."""
+        self.sec, self.profiles, self.recent = sec, list(sec["profiles"]), recent
+        self.intro.setText(
+            f"Rules for the <b>{html.escape(mouse)}</b>: when a matching window is focused, this mouse "
+            "switches to the rule's profile. The first matching rule wins; anything else uses "
+            "its default profile. Your other mice have their own rules (pick them under Device).")
         self.table.blockSignals(True)
         self.table.setRowCount(0)
-        for r in cfg["rules"]:
-            self._add_row(r["match"], r["profile"])
+        for r in sec.get("rules", []):
+            self._add_row(r["match"], r["profile"], r.get("caption", False))
         self.table.blockSignals(False)
 
     def set_recent(self, recent):
         self.recent = recent
 
-    def _add_row(self, match, profile):
+    def _add_row(self, match, profile, caption=False):
         row = self.table.rowCount()
         self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem(match))
+        cap = QTableWidgetItem()
+        cap.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        cap.setCheckState(Qt.Checked if caption else Qt.Unchecked)
+        self.table.setItem(row, 1, cap)
         combo = QComboBox()
         combo.addItems(self.profiles)
         if profile in self.profiles:
             combo.setCurrentText(profile)
         combo.currentTextChanged.connect(self._edited)
-        self.table.setCellWidget(row, 1, combo)
+        self.table.setCellWidget(row, 2, combo)
 
     def _append(self, match, profile):
         self._add_row(match, profile or (self.profiles[0] if self.profiles else ""))
@@ -892,9 +904,146 @@ class RulesEditor(QWidget):
             item = self.table.item(row, 0)
             match = item.text().strip() if item else ""
             if match:
-                rules.append({"match": match, "profile": self.table.cellWidget(row, 1).currentText()})
-        self.cfg["rules"] = rules
+                rule = {"match": match, "profile": self.table.cellWidget(row, 2).currentText()}
+                if self.table.item(row, 1).checkState() == Qt.Checked:
+                    rule["caption"] = True
+                rules.append(rule)
+        self.sec["rules"] = rules
         self.changed.emit()
+
+
+class ColorButton(QPushButton):
+    changed = Signal(str)
+
+    def __init__(self, title):
+        super().__init__()
+        self.title, self.color = title, "#ffffff"
+        self.setMinimumWidth(110)
+        self.clicked.connect(self._pick)
+
+    def set_color(self, color):
+        self.color = color
+        fg = "#000000" if QColor(color).lightness() > 140 else "#ffffff"
+        self.setText(color.upper())
+        self.setStyleSheet(f"background-color: {color}; color: {fg};")
+
+    def _pick(self):
+        c = QColorDialog.getColor(QColor(self.color), self, self.title)
+        if c.isValid():
+            self.set_color(c.name())
+            self.changed.emit(self.color)
+
+
+class LightingEditor(QWidget):
+    """The profile's "lighting": unset means the mouse keeps its own colours."""
+    changed = Signal()
+    EFFECT_LABELS = {"static": "Solid", "breathing": "Breathing", "cycle": "Colour cycle"}
+
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        intro = QLabel("The side buttons light in one colour. It's stored in the mouse with the "
+                       "profile, so switching between profiles with different lighting takes a few "
+                       "seconds (the G600 needs a pause around each write).")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        self.enabled = QCheckBox("Set lighting for this profile")
+        self.enabled.setToolTip("Off: keep whatever lighting the mouse had before ratd took it over")
+        self.enabled.toggled.connect(self._toggled)
+        lay.addWidget(self.enabled)
+        self.form_w = QWidget()
+        form = QFormLayout(self.form_w)
+        form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        self.color = ColorButton("Lighting colour")
+        self.color.changed.connect(lambda c: self._set("color", c))
+        form.addRow("Colour", self.color)
+        self.effect = QComboBox()
+        self.effect.currentIndexChanged.connect(self._effect_changed)
+        form.addRow("Effect", self.effect)
+        self.speed = QSpinBox()
+        self.speed.setRange(1, 15)
+        self.speed.setSuffix(" s")
+        self.speed.setToolTip("Seconds per breath or colour cycle")
+        self.speed.valueChanged.connect(lambda v: self._set("speed", v))
+        form.addRow("Speed", self.speed)
+        shift_row = QHBoxLayout()
+        self.shift_on = QCheckBox()
+        self.shift_on.toggled.connect(self._shift_toggled)
+        self.shift_color = ColorButton("Colour while G-Shift is held")
+        self.shift_color.changed.connect(lambda c: self._set("shift_color", c))
+        shift_row.addWidget(self.shift_on)
+        shift_row.addWidget(self.shift_color)
+        shift_row.addStretch()
+        self.shift_label = QLabel("Different colour while G-Shift is held")
+        form.addRow(self.shift_label, shift_row)
+        lay.addWidget(self.form_w)
+        lay.addStretch()
+        self.profile, self.caps = None, None
+
+    def set_profile(self, profile, caps):
+        self.profile, self.caps = profile, caps
+        light = profile.get("lighting")
+        for w in (self.enabled, self.effect, self.speed, self.shift_on):
+            w.blockSignals(True)
+        self.enabled.setChecked(bool(light))
+        self.effect.clear()
+        for e in caps.get("effects", ["static"]):
+            self.effect.addItem(self.EFFECT_LABELS.get(e, e), e)
+        light = light or {}
+        self.color.set_color(light.get("color", "#ff4000"))
+        self.effect.setCurrentIndex(max(0, self.effect.findData(light.get("effect", "static"))))
+        self.speed.setValue(light.get("speed", 4))
+        self.shift_on.setChecked("shift_color" in light)
+        self.shift_color.set_color(light.get("shift_color", "#00a0ff"))
+        for w in (self.enabled, self.effect, self.speed, self.shift_on):
+            w.blockSignals(False)
+        for w in (self.shift_label, self.shift_on, self.shift_color):
+            w.setVisible(bool(caps.get("shift_color")))
+        self._sync()
+
+    def _sync(self):
+        on = self.enabled.isChecked()
+        self.form_w.setEnabled(on)
+        self.speed.setEnabled(on and self.effect.currentData() != "static")
+        self.shift_color.setEnabled(on and self.shift_on.isChecked())
+
+    def _toggled(self, on):
+        if on:
+            self.profile["lighting"] = {"color": self.color.color, "effect": self.effect.currentData() or "static"}
+            if self.effect.currentData() != "static":
+                self.profile["lighting"]["speed"] = self.speed.value()
+            if self.shift_on.isChecked():
+                self.profile["lighting"]["shift_color"] = self.shift_color.color
+        else:
+            self.profile.pop("lighting", None)
+        self._sync()
+        self.changed.emit()
+
+    def _set(self, k, v):
+        if self.profile is not None and "lighting" in self.profile:
+            self.profile["lighting"][k] = v
+            self.changed.emit()
+
+    def _effect_changed(self, _i):
+        e = self.effect.currentData()
+        if self.profile is not None and "lighting" in self.profile and e:
+            light = self.profile["lighting"]
+            light["effect"] = e
+            if e == "static":
+                light.pop("speed", None)
+            else:
+                light["speed"] = self.speed.value()
+            self.changed.emit()
+        self._sync()
+
+    def _shift_toggled(self, on):
+        if self.profile is not None and "lighting" in self.profile:
+            if on:
+                self.profile["lighting"]["shift_color"] = self.shift_color.color
+            else:
+                self.profile["lighting"].pop("shift_color", None)
+            self.changed.emit()
+        self._sync()
 
 
 # ---- main window ---------------------------------------------------------------------------
@@ -990,6 +1139,9 @@ class Window(QMainWindow):
         self.rules = RulesEditor()
         self.rules.changed.connect(self._dirty)
         self.tabs.addTab(self.rules, QIcon.fromTheme("applications-games"), "Games / apps")
+        self.lighting = LightingEditor()
+        self.lighting.changed.connect(self._dirty)
+        self.light_tab = self.tabs.addTab(self.lighting, QIcon.fromTheme("color-management"), "Lighting")
 
         bottom = QHBoxLayout()
         self.notify_battery = QCheckBox("Low battery alerts")
@@ -1038,7 +1190,7 @@ class Window(QMainWindow):
             self.state = self.svc.state()
         except RuntimeError as e:
             QMessageBox.critical(self, "ratd", f"Can't reach the ratd service:\n{e}")
-            self.cfg = {"version": 1, "rules": [], "devices": {}}
+            self.cfg = {"version": 1, "devices": {}}
         self.saved = copy.deepcopy(self.cfg)
         self.notify_battery.blockSignals(True)
         self.notify_battery.setChecked(self.cfg.get("notify_low_battery", True))
@@ -1050,6 +1202,7 @@ class Window(QMainWindow):
         for k in self.cfg["devices"]:
             self.device.addItem(k.split(":", 1)[-1], k)
         self.device.blockSignals(False)
+        keep = keep or self.state.get("active")
         i = self.device.findData(keep) if keep else 0
         self.device.setCurrentIndex(max(i, 0))
         self._device_changed()
@@ -1136,7 +1289,12 @@ class Window(QMainWindow):
         live = self._live()
         limits = (live["dpi_min"], live["dpi_max"]) if live and live.get("dpi_min") else (100, 44000)
         self.dpi.set_profile(prof, limits, live.get("report_rates", []) if live else [])
-        self.rules.set_data(self.cfg, list(sec["profiles"]), self.state.get("recent", []))
+        self.rules.set_data(sec, self.device.currentText(), self.state.get("recent", []))
+        cls = backends.model_class(self.dkey)
+        caps = (live or {}).get("lighting") or (cls.LIGHTING if cls else None)
+        self.tabs.setTabVisible(self.light_tab, bool(caps))
+        if caps:
+            self.lighting.set_profile(prof, caps)
         self.make_default.setEnabled(name != sec["default_profile"])
 
     def _layer_changed(self, i):
@@ -1285,7 +1443,7 @@ class Window(QMainWindow):
             sec["profiles"] = {(name if k == cur else k): v for k, v in sec["profiles"].items()}
             if sec["default_profile"] == cur:
                 sec["default_profile"] = name
-            for r in self.cfg["rules"]:
+            for r in sec.get("rules", []):
                 if r["profile"] == cur:
                     r["profile"] = name
             self._fill_profiles(name)
@@ -1298,14 +1456,14 @@ class Window(QMainWindow):
         if cur == sec["default_profile"]:
             QMessageBox.information(self, "Delete profile", "Choose another default profile first.")
             return
-        used = [r["match"] for r in self.cfg["rules"] if r["profile"] == cur]
+        used = [r["match"] for r in sec.get("rules", []) if r["profile"] == cur]
         msg = f"Delete the profile “{cur}”?"
         if used:
             msg += "\n\nThese rules use it and will be removed too:\n" + "\n".join(used)
         if QMessageBox.question(self, "Delete profile", msg) != QMessageBox.Yes:
             return
         del sec["profiles"][cur]
-        self.cfg["rules"] = [r for r in self.cfg["rules"] if r["profile"] != cur]
+        sec["rules"] = [r for r in sec.get("rules", []) if r["profile"] != cur]
         self._fill_profiles()
         self._dirty()
 
@@ -1393,7 +1551,7 @@ class Window(QMainWindow):
             return
         data = {"ratd_profile": 1, "model": self.dkey.split(":", 1)[-1], "name": cur,
                 "profile": sec["profiles"][cur],
-                "rules": [r["match"] for r in self.cfg["rules"] if r["profile"] == cur]}
+                "rules": [r["match"] for r in sec.get("rules", []) if r["profile"] == cur]}
         try:
             with open(path, "w") as f:
                 json.dump(data, f, indent=2)
@@ -1435,9 +1593,10 @@ class Window(QMainWindow):
                 return
         trial = copy.deepcopy(self.cfg)
         trial["devices"][self.dkey]["profiles"][name] = prof
-        known = {r["match"] for r in trial["rules"]}
+        rules = trial["devices"][self.dkey].setdefault("rules", [])
+        known = {r["match"] for r in rules}
         added = [m for m in data.get("rules", []) if isinstance(m, str) and m not in known]
-        trial["rules"] += [{"match": m, "profile": name} for m in added]
+        rules += [{"match": m, "profile": name} for m in added]
         try:
             config.validate(trial)
         except config.ConfigError as e:

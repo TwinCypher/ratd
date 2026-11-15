@@ -4,21 +4,29 @@ Layout:
 {
   "version": 1,
   "notify_low_battery": true,                                     # optional, default true
-  "rules": [{"match": "overwatch.exe", "profile": "Overwatch"}],   # window class glob
   "devices": {
     "<device key>": {
       "default_profile": "Desktop",
+      # per mouse: window class glob (or caption, with "caption": true) -> one of ITS profiles
+      "rules": [{"match": "overwatch.exe", "profile": "Overwatch"}],
       "profiles": {
         "Desktop": {"dpi": [800, 1600, 3200], "dpi_index": 1, "sniper_dpi": 400,
                     "report_rate": 500,                  # optional Hz; unset = fastest
                     "buttons": {"back": {"type": "default"}, ...},
                     # optional: bindings while a {"type": "shift"} button is held; buttons
                     # not listed keep their normal binding. wheel_up / wheel_down = per notch.
-                    "shift": {"middle": {"type": "media", "action": "playpause"}, ...}}
+                    "shift": {"middle": {"type": "media", "action": "playpause"}, ...},
+                    # optional, mice with lighting (G600): unset = leave the mouse's own
+                    "lighting": {"color": "#ff4000", "effect": "static"|"breathing"|"cycle",
+                                 "speed": 4,             # seconds per breath/cycle, 1-15
+                                 "shift_color": "#00a0ff"}}   # while G-Shift is held
       }
     }
   }
 }
+
+Older configs had one top-level "rules" list for every mouse; load() moves each rule
+into the devices that have its profile.
 
 Button actions:
   {"type": "default"}                          the button's normal function
@@ -42,6 +50,7 @@ import copy
 import fnmatch
 import json
 import os
+import re
 import tempfile
 
 from . import keymap
@@ -50,6 +59,8 @@ PATH = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.con
 ACTION_TYPES = {"default", "none", "key", "keys", "dpi", "scroll", "command", "media", "shift"}
 DPI_ACTIONS = {"cycle", "up", "down", "shift"}
 MEDIA_ACTIONS = {"playpause", "next", "previous", "stop"}
+LIGHT_EFFECTS = ("static", "breathing", "cycle")
+COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 LOCKED_BUTTONS = {"left"}          # never remappable, so the mouse can't be made unusable
 
 
@@ -58,7 +69,20 @@ class ConfigError(ValueError):
 
 
 def empty():
-    return {"version": 1, "rules": [], "devices": {}}
+    return {"version": 1, "devices": {}}
+
+
+def migrate(cfg):
+    """Move old top-level rules into each device that has the rule's profile. True if changed."""
+    if "rules" not in cfg:
+        return False
+    old = cfg.pop("rules") or []
+    for dev in cfg.get("devices", {}).values():
+        mine = dev.setdefault("rules", [])
+        for r in old:
+            if isinstance(r, dict) and r.get("profile") in dev.get("profiles", {}) and r not in mine:
+                mine.append(copy.deepcopy(r))
+    return True
 
 
 def load():
@@ -67,6 +91,8 @@ def load():
             cfg = json.load(f)
     except FileNotFoundError:
         return empty()
+    if isinstance(cfg, dict) and migrate(cfg):
+        save(cfg)
     validate(cfg)
     return cfg
 
@@ -97,13 +123,17 @@ def validate(cfg):
     ign = cfg.get("media_ignore", [])
     if not isinstance(ign, list) or not all(isinstance(s, str) for s in ign):
         raise ConfigError("media_ignore must be a list of app names")
-    for i, rule in enumerate(cfg.get("rules", [])):
-        if not isinstance(rule.get("match"), str) or not isinstance(rule.get("profile"), str):
-            raise ConfigError(f"rule {i}: needs string 'match' and 'profile'")
+    if "rules" in cfg:
+        raise ConfigError("'rules' now live in each device's section")
     for dkey, dev in cfg.get("devices", {}).items():
         profiles = dev.get("profiles", {})
         if dev.get("default_profile") not in profiles:
             raise ConfigError(f"{dkey}: default_profile must name one of its profiles")
+        for i, rule in enumerate(dev.get("rules", [])):
+            if not isinstance(rule.get("match"), str) or not isinstance(rule.get("profile"), str):
+                raise ConfigError(f"{dkey}: rule {i}: needs string 'match' and 'profile'")
+            if rule["profile"] not in profiles:
+                raise ConfigError(f"{dkey}: rule {rule['match']!r} uses a profile this mouse doesn't have")
         for pname, p in profiles.items():
             where = f"{dkey} / {pname}"
             dpi = p.get("dpi")
@@ -123,6 +153,20 @@ def validate(cfg):
                 _validate_action(f"{where} / shift / {bname}", bname, act)
                 if act["type"] == "shift":
                     raise ConfigError(f"{where} / shift / {bname}: can't shift inside the shift layer")
+            if "lighting" in p:
+                _validate_lighting(where, p["lighting"])
+
+
+def _validate_lighting(where, light):
+    if not isinstance(light, dict):
+        raise ConfigError(f"{where}: 'lighting' must be an object")
+    for k in ("color", "shift_color"):
+        if (k == "color" or k in light) and not (isinstance(light.get(k), str) and COLOR.fullmatch(light[k])):
+            raise ConfigError(f"{where}: lighting {k} must be #rrggbb")
+    if light.get("effect", "static") not in LIGHT_EFFECTS:
+        raise ConfigError(f"{where}: lighting effect must be one of {list(LIGHT_EFFECTS)}")
+    if not (isinstance(light.get("speed", 4), int) and 1 <= light.get("speed", 4) <= 15):
+        raise ConfigError(f"{where}: lighting speed must be 1-15 seconds")
 
 
 def _validate_action(where, bname, act):
@@ -159,10 +203,10 @@ def _validate_action(where, bname, act):
         raise ConfigError(f"{where}: media action must be one of {sorted(MEDIA_ACTIONS)}")
 
 
-def match_rule(cfg, window_class, caption=""):
-    """First rule whose glob matches the window class (or caption), case-insensitive."""
+def match_rule(section, window_class, caption=""):
+    """First of a device's rules whose glob matches the window class (or caption), case-insensitive."""
     wc, cap = (window_class or "").lower(), (caption or "").lower()
-    for rule in cfg.get("rules", []):
+    for rule in section.get("rules", []):
         pat = rule["match"].lower()
         if fnmatch.fnmatchcase(wc, pat) or (rule.get("caption") and fnmatch.fnmatchcase(cap, pat)):
             return rule["profile"]

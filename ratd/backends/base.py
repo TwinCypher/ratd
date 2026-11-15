@@ -24,8 +24,9 @@ SCROLL_REPEAT = (0.30, 0.08)   # first repeat delay, then interval, while a tilt
 
 # Daemon callbacks every mouse gets: on_change(mouse) when state changes, coroutine
 # on_wake(mouse) when the link comes up, coroutine on_media(action) for media buttons,
-# and volume (volume.Volume), which takes volume keys when they're pinned to a device.
-Hooks = namedtuple("Hooks", "on_change on_wake on_media volume")
+# volume (volume.Volume), which takes volume keys when they're pinned to a device, and
+# on_used(mouse) on every button press or wake, so the daemon knows which mouse is in hand.
+Hooks = namedtuple("Hooks", "on_change on_wake on_media volume on_used")
 
 
 # What talking to a mouse can raise without it being a bug in ratd.
@@ -66,6 +67,7 @@ class Mouse:
     MODELS = {}            # model name -> button names, in button index order
     LABELS = {}            # button name -> GUI label
     DEFAULTS = {}          # button name -> what {"type": "default"} means for it
+    LIGHTING = None        # {"effects": [...], "shift_color": bool} if profiles can set lighting
 
     def __init__(self, evdev_path, hooks):
         self.evdev_path = evdev_path
@@ -73,6 +75,7 @@ class Mouse:
         self.on_wake = hooks.on_wake
         self.on_media = hooks.on_media
         self.volume = hooks.volume
+        self.on_used = hooks.on_used
         self.keymap = None
         self.vkbd = keymap.VirtualKeyboard()
         self.name = "?"
@@ -129,6 +132,7 @@ class Mouse:
                 "buttons": [{"id": b, "label": self.LABELS.get(b, b),
                              "default": self.DEFAULTS.get(b) if self.model else None,
                              "locked": b in config.LOCKED_BUTTONS} for b in self.buttons],
+                "lighting": self.LIGHTING,
                 "dpi_min": self.dpi_choices[0] if self.dpi_choices else None,
                 "dpi_max": self.dpi_choices[-1] if self.dpi_choices else None}
 
@@ -186,6 +190,7 @@ class Mouse:
 
     async def _woke(self):
         await asyncio.sleep(0.3)            # let the mouse finish waking up
+        self.on_used(self)
         await self.on_wake(self)
 
     def _offline(self):
@@ -307,6 +312,7 @@ class Mouse:
     def _button(self, name, down):
         # A release goes to whatever the press did, even if shift changed in between.
         if down:
+            self.on_used(self)
             shifted = name in self._layer()
             act = self._layer()[name] if shifted else self._action(name)
             self._pressed[name] = (act, shifted)

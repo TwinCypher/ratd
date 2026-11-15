@@ -5,6 +5,16 @@ from . import g600, logitech
 BACKENDS = [logitech, g600]
 
 
+def model_class(key):
+    """The Mouse class for a config key like 'logitech:G600', or None."""
+    vendor, _, model = key.partition(":")
+    for backend in BACKENDS:
+        for cls in vars(backend).values():
+            if getattr(cls, "VENDOR", None) == vendor and model in getattr(cls, "MODELS", {}):
+                return cls
+    return None
+
+
 def model_tables(key):
     """(button names, labels, defaults) for a config key like 'logitech:G502 X', or None."""
     vendor, _, model = key.partition(":")

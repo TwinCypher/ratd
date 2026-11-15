@@ -35,6 +35,9 @@ ACTIVE = 0xF0                       # read: profile << 4 | dpi slot << 1; write:
 SETTLE = 2.0                        # quiet seconds around a flash write
 DPI_MIN, DPI_MAX, DPI_STEP = 200, 8200, 50
 RATES = [125, 250, 500, 1000]       # polling rate byte = 1000 / Hz - 1
+# Lighting (one zone): profile bytes 1-3 RGB, 4 effect, 5 seconds per breath/cycle
+# (libratbag's reading), 91-93 the RGB shown while G-Shift is held.
+EFFECT = {"static": 0, "breathing": 1, "cycle": 2}
 
 # Onboard button codes (code, modifier bits, HID key usage).
 NATIVE_BUTTONS = ["BTN_LEFT", "BTN_RIGHT", "BTN_MIDDLE", "BTN_SIDE", "BTN_EXTRA"]   # codes 1-5
@@ -162,6 +165,7 @@ class G600Node:
 class G600Mouse(Mouse):
     VENDOR = "logitech"
     MODELS, LABELS, DEFAULTS = MODELS, LABELS, DEFAULTS
+    LIGHTING = {"effects": list(EFFECT), "shift_color": True}
 
     def __init__(self, node, mouse_hidraw, evdev_path, kbd_evdev, hooks):
         super().__init__(evdev_path, hooks)
@@ -291,9 +295,17 @@ class G600Mouse(Mouse):
 
     # ---- onboard profile -------------------------------------------------------
 
-    def _build(self, rate):
-        """ratd's profile report: the hand-back profile's look, our buttons, DPI slots, rate."""
+    def _build(self, rate, profile=None):
+        """ratd's profile report: our buttons, DPI slots, rate, and the profile's lighting
+        (the hand-back profile's look if it sets none)."""
         r = bytearray(self._hand_back_report)
+        light = (profile or self._profile or {}).get("lighting")
+        if light:
+            rgb = bytes.fromhex(light["color"][1:])
+            r[1:4] = rgb
+            r[4] = EFFECT[light.get("effect", "static")]
+            r[5] = light.get("speed", 4)
+            r[91:94] = bytes.fromhex(light["shift_color"][1:]) if light.get("shift_color") else rgb
         r[0] = 0xF3 + RATD_SLOT
         for i in range(20):
             entry = bytes([MOUSE_CODE[i], 0, 0]) if i in MOUSE_CODE else bytes([0, 0, KEY_USAGE[i]])
@@ -337,7 +349,7 @@ class G600Mouse(Mouse):
     async def _apply_hw(self, profile):
         self._slots = self._slots_for(profile)
         rate = self._rate_for(profile)
-        await self._write_onboard(self._build(rate))
+        await self._write_onboard(self._build(rate, profile))
         self.report_rate = rate
 
     async def _write_dpi(self, dpi):

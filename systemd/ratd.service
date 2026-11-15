@@ -2,6 +2,8 @@
 Description=ratd mouse configuration service
 PartOf=graphical-session.target
 After=graphical-session.target
+# Only reached when systemd gives up restarting it (5 failures in 10 s)
+OnFailure=ratd-failed.service
 
 [Service]
 Environment=PYTHONPATH=%h/Projects/ratd

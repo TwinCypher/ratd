@@ -86,7 +86,7 @@ sudo udevadm control --reload && sudo udevadm trigger
 
 # 2. The service (the unit expects the checkout at ~/Projects/ratd; edit PYTHONPATH if not)
 mkdir -p ~/.config/systemd/user
-ln -s "$PWD/systemd/ratd.service" ~/.config/systemd/user/
+ln -s "$PWD/systemd/ratd.service" "$PWD/systemd/ratd-failed.service" ~/.config/systemd/user/
 systemctl --user enable --now ratd
 
 # 3. Commands and app-menu entry

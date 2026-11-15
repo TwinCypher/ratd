@@ -39,6 +39,7 @@ class Daemon:
         self.volume = None
         self._battery_warned = {}
         self._apply_tasks = set()
+        self._delayed = {}           # mouse -> task waiting out its SWITCH_DELAY
 
     # ---- discovery -------------------------------------------------------------
 
@@ -90,6 +91,9 @@ class Daemon:
     def forget(self, path):
         for key in [k for k in self.mice if k[0] == path]:
             m = self.mice.pop(key)
+            t = self._delayed.pop(m, None)
+            if t:
+                t.cancel()
             m.detach()
             log.info("%s: removed", m.name)
         hn = self.nodes.pop(path, None)
@@ -117,12 +121,27 @@ class Daemon:
             except DEVICE_ERRORS as e:
                 log.warning("%s: applying profile %s failed: %s", m.name, name, e)
 
-    async def apply_all(self, force=False):
+    async def apply_all(self, force=False, focus=False):
+        """focus=True: a window change, so mice with a SWITCH_DELAY wait for focus to settle."""
         for m in list(self.mice.values()):
-            await self._apply(m, force)
+            if focus and m.SWITCH_DELAY:
+                self._apply_later(m)
+            else:
+                await self._apply(m, force)
 
-    def schedule_apply(self, force=False):
-        t = asyncio.get_running_loop().create_task(self.apply_all(force))
+    def _apply_later(self, m):
+        old = self._delayed.pop(m, None)
+        if old:
+            old.cancel()                    # only ever cancelled while still sleeping
+        self._delayed[m] = asyncio.get_running_loop().create_task(self._settle_then_apply(m))
+
+    async def _settle_then_apply(self, m):
+        await asyncio.sleep(m.SWITCH_DELAY)
+        self._delayed.pop(m, None)          # past this point a newer switch waits its turn
+        await self._apply(m)
+
+    def schedule_apply(self, force=False, focus=False):
+        t = asyncio.get_running_loop().create_task(self.apply_all(force, focus))
         self._apply_tasks.add(t)
         t.add_done_callback(self._apply_tasks.discard)
 
@@ -288,7 +307,7 @@ class Manager(ServiceInterface):
         if window_class:
             entry = {"class": window_class, "caption": caption}
             self.d.recent = [entry] + [r for r in self.d.recent if r["class"] != window_class][:19]
-        self.d.schedule_apply()
+        self.d.schedule_apply(focus=True)
         self.d._emit()
 
     @method()

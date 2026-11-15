@@ -1,0 +1,6 @@
+[Unit]
+Description=Tell the user ratd has stopped
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/notify-send -a ratd -u critical -i input-mouse "Mouse service stopped" "ratd crashed and won't restart on its own. Combos, media, DPI buttons and profile switching are off.\nCheck: journalctl --user -u ratd\nRestart: systemctl --user restart ratd"

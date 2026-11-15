@@ -166,6 +166,7 @@ class G600Mouse(Mouse):
     VENDOR = "logitech"
     MODELS, LABELS, DEFAULTS = MODELS, LABELS, DEFAULTS
     LIGHTING = {"effects": list(EFFECT), "shift_color": True}
+    SWITCH_DELAY = 1.0      # profile switches are flash writes: let quick alt-tabbing settle first
 
     def __init__(self, node, mouse_hidraw, evdev_path, kbd_evdev, hooks):
         super().__init__(evdev_path, hooks)
@@ -179,6 +180,7 @@ class G600Mouse(Mouse):
         self._hand_back_slot = 0
         self._hand_back_report = None   # profile report active before the takeover
         self._onboard = None            # ratd's profile report as the mouse has it
+        self._write_lock = asyncio.Lock()   # a write and its read-back must not interleave with another
         self._slots = []                # its four DPI slots, 0 = unused
         self._spy_fds = []
         self._mouse_mask = 0
@@ -318,13 +320,15 @@ class G600Mouse(Mouse):
         return bytes(r)
 
     async def _write_onboard(self, data):
-        if data == self._onboard:
-            return
-        await self.node.set(data, flash=True)
-        back = await self.node.get(data[0], PROFILE_SIZE)
-        if back != data:
-            raise DeviceError("the G600 stored ratd's profile wrongly")
-        self._onboard = data
+        async with self._write_lock:
+            if data == self._onboard:
+                return
+            await self.node.set(data, flash=True)
+            back = await self.node.get(data[0], PROFILE_SIZE)
+            if back != data:
+                self._onboard = None        # unknown now: the next apply rewrites it
+                raise DeviceError("the G600 stored ratd's profile wrongly")
+            self._onboard = data
         log.info("%s: wrote onboard profile %d (DPI slots %s, %d Hz)", self.name, RATD_SLOT,
                  self._slots, 1000 // (data[11] + 1))
 

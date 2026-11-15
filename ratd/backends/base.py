@@ -68,6 +68,7 @@ class Mouse:
     LABELS = {}            # button name -> GUI label
     DEFAULTS = {}          # button name -> what {"type": "default"} means for it
     LIGHTING = None        # {"effects": [...], "shift_color": bool} if profiles can set lighting
+    SWITCH_DELAY = 0.0     # seconds focus must stay put before a focus-driven profile switch
 
     def __init__(self, evdev_path, hooks):
         self.evdev_path = evdev_path
